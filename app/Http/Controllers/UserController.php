@@ -3,10 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Http\Resources\UserResource;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rule;
-use app\Http\Resources\UserResource;
 
 class UserController extends Controller
 {
@@ -36,8 +36,9 @@ class UserController extends Controller
         $validated['password'] = Hash::make($validated['password']);
 
         $user = User::create($validated);
+        $user->load('department');
 
-        return response()->json($user, 201);
+        return new UserResource($user);
     }
 
     /**
@@ -74,8 +75,9 @@ class UserController extends Controller
         }
 
         $user->update($validated);
+        $user->load('department');
 
-        return response()->json($user);
+        return new UserResource($user);
     }
 
     /**
