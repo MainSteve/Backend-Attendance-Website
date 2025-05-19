@@ -13,7 +13,13 @@ return new class extends Migration
     {
         Schema::create('leave_requests', function (Blueprint $table) {
             $table->id();
-            $table->timestamps();
+            $table->foreignId('user_id')->constrained();
+            $table->string('type', 10)->comment('izin, sakit, or cuti');
+            $table->text('reason')->nullable();
+            $table->date('start_date');
+            $table->date('end_date');
+            $table->string('status', 10)->comment('pending, approved, or rejected');
+            $table->timestamp('created_at')->useCurrent();
         });
     }
 

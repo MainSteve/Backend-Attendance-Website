@@ -13,7 +13,11 @@ return new class extends Migration
     {
         Schema::create('task_logs', function (Blueprint $table) {
             $table->id();
-            $table->timestamps();
+            $table->foreignId('user_id')->constrained();
+            $table->foreignId('attendance_id')->constrained();
+            $table->text('description')->nullable();
+            $table->string('photo_url')->nullable();
+            $table->timestamp('created_at')->useCurrent();
         });
     }
 

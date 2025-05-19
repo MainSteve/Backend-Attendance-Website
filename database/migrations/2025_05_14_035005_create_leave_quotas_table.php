@@ -13,7 +13,13 @@ return new class extends Migration
     {
         Schema::create('leave_quotas', function (Blueprint $table) {
             $table->id();
+            $table->foreignId('user_id')->constrained();
+            $table->integer('year');
+            $table->integer('total_quota')->default(12);
+            $table->integer('used_quota')->default(0);
+            $table->integer('remaining_quota')->default(12);
             $table->timestamps();
+            $table->unique(['user_id', 'year']);
         });
     }
 

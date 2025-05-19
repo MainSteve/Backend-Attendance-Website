@@ -11,10 +11,33 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('database_indexes', function (Blueprint $table) {
-            $table->id();
-            $table->timestamps();
+        // Add indexes for better performance
+        Schema::table('attendances', function (Blueprint $table) {
+            $table->index('user_id', 'idx_attendances_user_id');
         });
+
+        Schema::table('leave_requests', function (Blueprint $table) {
+            $table->index('user_id', 'idx_leave_requests_user_id');
+        });
+
+        Schema::table('leave_quotas', function (Blueprint $table) {
+            $table->index(['user_id', 'year'], 'idx_leave_quotas_user_id_year');
+        });
+
+        Schema::table('working_hours', function (Blueprint $table) {
+            $table->index('user_id', 'idx_working_hours_user_id');
+        });
+
+        Schema::table('users', function (Blueprint $table) {
+            $table->index('department_id', 'idx_users_department_id');
+            $table->index('email', 'idx_users_email');
+        });
+
+        if (Schema::hasTable('personal_access_tokens')) {
+            Schema::table('personal_access_tokens', function (Blueprint $table) {
+                $table->index(['tokenable_type', 'tokenable_id'], 'idx_personal_access_tokens_tokenable');
+            });
+        }
     }
 
     /**
@@ -22,6 +45,31 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('database_indexes');
+        Schema::table('attendances', function (Blueprint $table) {
+            $table->dropIndex('idx_attendances_user_id');
+        });
+
+        Schema::table('leave_requests', function (Blueprint $table) {
+            $table->dropIndex('idx_leave_requests_user_id');
+        });
+
+        Schema::table('leave_quotas', function (Blueprint $table) {
+            $table->dropIndex('idx_leave_quotas_user_id_year');
+        });
+
+        Schema::table('working_hours', function (Blueprint $table) {
+            $table->dropIndex('idx_working_hours_user_id');
+        });
+
+        Schema::table('users', function (Blueprint $table) {
+            $table->dropIndex('idx_users_department_id');
+            $table->dropIndex('idx_users_email');
+        });
+
+        if (Schema::hasTable('personal_access_tokens')) {
+            Schema::table('personal_access_tokens', function (Blueprint $table) {
+                $table->dropIndex('idx_personal_access_tokens_tokenable');
+            });
+        }
     }
 };

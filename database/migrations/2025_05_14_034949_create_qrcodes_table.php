@@ -13,7 +13,10 @@ return new class extends Migration
     {
         Schema::create('qrcodes', function (Blueprint $table) {
             $table->id();
-            $table->timestamps();
+            $table->string('code')->unique();
+            $table->timestamp('valid_until');
+            $table->string('status', 10)->comment('active or used');
+            $table->timestamp('created_at')->useCurrent();
         });
     }
 

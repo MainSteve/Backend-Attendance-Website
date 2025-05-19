@@ -13,7 +13,11 @@ return new class extends Migration
     {
         Schema::create('attendances', function (Blueprint $table) {
             $table->id();
-            $table->timestamps();
+            $table->foreignId('user_id')->constrained();
+            $table->string('clock_type', 5)->comment('in or out');
+            $table->string('location')->nullable();
+            $table->string('method', 10)->comment('qr or tasklog');
+            $table->timestamp('created_at')->useCurrent();
         });
     }
 
