@@ -10,6 +10,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
+use App\Models\WorkingHour;
+use App\Models\Holiday;
 
 const VALIDATION_FAILED_MESSAGE = 'Validation failed';
 
@@ -340,61 +342,6 @@ class AttendanceController extends Controller
      * @param  \Illuminate\Http\Request  $request
      * @return \Illuminate\Http\JsonResponse
      */
-    private function validateReportRequest(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'start_date' => 'required|date',
-            'end_date' => 'required|date|after_or_equal:start_date',
-            'include_task_logs' => 'nullable|boolean',
-            'filter_clock_type' => 'nullable|in:in,out',
-            'filter_method' => 'nullable|in:manual,qr_code',
-            'filter_location' => 'nullable|string',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'status' => false,
-                'message' => VALIDATION_FAILED_MESSAGE,
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        // Return a successful response or null if validation succeeds
-        return null;
-    }
-
-    private function getAttendanceRecords(Request $request)
-    {
-        $user_id = Auth::id();
-        $startDate = $request->start_date;
-        $endDate = $request->end_date;
-
-        $query = Attendance::query()
-            ->where('user_id', $user_id)
-            ->whereDate('created_at', '>=', $startDate)
-            ->whereDate('created_at', '<=', $endDate);
-
-        // Apply filters if provided
-        if ($request->has('filter_clock_type')) {
-            $query->where('clock_type', $request->filter_clock_type);
-        }
-
-        if ($request->has('filter_method')) {
-            $query->where('method', $request->filter_method);
-        }
-
-        if ($request->has('filter_location')) {
-            $query->where('location', 'like', '%' . $request->filter_location . '%');
-        }
-
-        // Conditionally include task logs
-        if ($request->input('include_task_logs', true)) {
-            $query->with('taskLogs');
-        }
-
-        return $query->orderBy('created_at', 'asc')->get();
-    }
-
     private function groupAttendanceRecordsByDate($attendances)
     {
         return $attendances->groupBy(function ($item) {
@@ -459,71 +406,353 @@ class AttendanceController extends Controller
         return $report;
     }
 
+    /**
+     * Get attendance report for a date range, taking holidays and working hours into account.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\JsonResponse
+     */
+    /**
+     * Get attendance report for a date range, taking holidays and working hours into account.
+     * Admins can view reports for any user by providing a user_id parameter.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\JsonResponse
+     */
     public function report(Request $request)
     {
-        $validationResponse = $this->validateReportRequest($request);
-        if ($validationResponse !== null) {
-            return $validationResponse;
+        $validationRules = [
+            'start_date' => 'required|date',
+            'end_date' => 'required|date|after_or_equal:start_date',
+            'include_task_logs' => 'nullable|boolean',
+            'filter_clock_type' => 'nullable|in:in,out',
+            'filter_method' => 'nullable|in:manual,qr_code',
+            'filter_location' => 'nullable|string',
+        ];
+
+        // Add user_id validation if the current user is an admin
+        $currentUser = Auth::user();
+        $isAdmin = $currentUser->role === 'admin';
+
+        if ($isAdmin) {
+            $validationRules['user_id'] = 'nullable|exists:users,id';
+        }
+
+        $validator = Validator::make($request->all(), $validationRules);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => false,
+                'message' => VALIDATION_FAILED_MESSAGE,
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        // Determine which user's attendance to report on
+        $user_id = $currentUser->id;
+        $reportUser = $currentUser;
+
+        // If admin is requesting another user's report
+        if ($isAdmin && $request->has('user_id')) {
+            $user_id = $request->user_id;
+            $reportUser = \App\Models\User::find($user_id);
+
+            if (!$reportUser) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'User not found'
+                ], 404);
+            }
         }
 
         $includeTaskLogs = $request->input('include_task_logs', true);
-
-        $attendances = $this->getAttendanceRecords($request);
-
-        $groupedAttendances = $this->groupAttendanceRecordsByDate($attendances);
-
-        $report = $this->processDailyStats($groupedAttendances, $includeTaskLogs);
-
-        // Calculate date range totals
         $startDate = Carbon::parse($request->start_date);
         $endDate = Carbon::parse($request->end_date);
+
+        // Get the user's attendance records
+        $attendances = $this->getAttendanceRecordsForUser($request, $user_id);
+        $groupedAttendances = $this->groupAttendanceRecordsByDate($attendances);
+        $report = $this->processDailyStats($groupedAttendances, $includeTaskLogs);
+
+        // Get holidays in this date range
+        $holidays = Holiday::where(function ($query) use ($startDate, $endDate) {
+            // Regular holidays in the date range
+            $query->whereBetween('date', [$startDate->toDateString(), $endDate->toDateString()]);
+
+            // Or recurring holidays that fall within this date range
+            $query->orWhere(function ($q) use ($startDate, $endDate) {
+                $q->where('is_recurring', true)
+                    ->where(function ($dateQ) use ($startDate, $endDate) {
+                        // Loop through each date in range to check for recurring holidays
+                        for ($date = $startDate->copy(); $date->lte($endDate); $date->addDay()) {
+                            $dateQ->orWhere(function ($dayMonthQ) use ($date) {
+                                $dayMonthQ->whereDay('date', $date->day)
+                                    ->whereMonth('date', $date->month);
+                            });
+                        }
+                    });
+            });
+        })->get();
+
+        // Map holidays to their dates for easy lookup
+        $holidayDates = [];
+        foreach ($holidays as $holiday) {
+            if ($holiday->is_recurring) {
+                // For recurring holidays, add all instances in the date range
+                for ($date = $startDate->copy(); $date->lte($endDate); $date->addDay()) {
+                    if (
+                        $date->day == Carbon::parse($holiday->date)->day &&
+                        $date->month == Carbon::parse($holiday->date)->month
+                    ) {
+                        $formattedDate = $date->toDateString();
+                        $holidayDates[$formattedDate] = $holiday;
+                    }
+                }
+            } else {
+                // For regular holidays
+                $formattedDate = Carbon::parse($holiday->date)->toDateString();
+                $holidayDates[$formattedDate] = $holiday;
+            }
+        }
+
+        // Get working hours for the user
+        $workingHours = WorkingHour::where('user_id', $user_id)->get()->keyBy('day_of_week');
+
+        // Calculate total days in range
         $totalDaysInRange = $endDate->diffInDays($startDate) + 1;
 
-        // Count weekdays/weekends in the date range
-        $weekdays = 0;
+        // Initialize counters
+        $workDays = 0;
+        $workingDaysPresentCount = 0;
+        $workingDaysAbsentCount = 0;
+        $holidayCount = count($holidayDates);
         $weekends = 0;
+        $weekdays = 0;
+        $totalScheduledMinutes = 0;
+        $totalActualMinutes = 0;
+
+        // Enhanced daily records with working hours and holiday info
+        $enhancedReport = [];
+
+        // Process each day in the date range
         for ($date = $startDate->copy(); $date->lte($endDate); $date->addDay()) {
+            $dateStr = $date->toDateString();
+            $dayOfWeek = strtolower($date->format('l'));
+
+            // Check if this is a holiday
+            $isHoliday = isset($holidayDates[$dateStr]);
+            $holidayInfo = $isHoliday ? $holidayDates[$dateStr] : null;
+
+            // Check if this is a work day (has working hours and not a holiday)
+            $hasWorkingHours = isset($workingHours[$dayOfWeek]);
+            $isWorkDay = $hasWorkingHours && !$isHoliday;
+
+            // Update counters
             if ($date->isWeekday()) {
                 $weekdays++;
             } else {
                 $weekends++;
             }
+
+            if ($isWorkDay) {
+                $workDays++;
+
+                // Calculate scheduled hours for this day
+                $scheduledStartTime = isset($workingHours[$dayOfWeek]) ?
+                    Carbon::parse($workingHours[$dayOfWeek]->start_time) : null;
+                $scheduledEndTime = isset($workingHours[$dayOfWeek]) ?
+                    Carbon::parse($workingHours[$dayOfWeek]->end_time) : null;
+
+                $scheduledMinutes = $scheduledStartTime && $scheduledEndTime ?
+                    $scheduledEndTime->diffInMinutes($scheduledStartTime) : 0;
+
+                $totalScheduledMinutes += $scheduledMinutes;
+            }
+
+            // Find the existing report entry for this date or create a new one
+            $dayReport = null;
+            foreach ($report as $r) {
+                if ($r['date'] == $dateStr) {
+                    $dayReport = $r;
+                    break;
+                }
+            }
+
+            if ($dayReport) {
+                // Day exists in attendance record
+                if ($isWorkDay) {
+                    $workingDaysPresentCount++;
+                    $totalActualMinutes += $dayReport['total_minutes'] ?? 0;
+                }
+
+                // Add working hours and holiday info to the report
+                $dayReport['is_holiday'] = $isHoliday;
+                $dayReport['holiday_info'] = $isHoliday ? [
+                    'id' => $holidayInfo->id,
+                    'name' => $holidayInfo->name,
+                    'description' => $holidayInfo->description,
+                    'is_recurring' => $holidayInfo->is_recurring
+                ] : null;
+
+                $dayReport['scheduled_hours'] = $isWorkDay ? [
+                    'start_time' => $scheduledStartTime ? $scheduledStartTime->format('H:i:s') : null,
+                    'end_time' => $scheduledEndTime ? $scheduledEndTime->format('H:i:s') : null,
+                    'duration_minutes' => $scheduledMinutes,
+                    'hours_formatted' => $scheduledMinutes ?
+                        sprintf("%d:%02d", floor($scheduledMinutes / 60), $scheduledMinutes % 60) : null
+                ] : null;
+
+                $enhancedReport[] = $dayReport;
+            } else {
+                // Day doesn't exist in attendance records
+                if ($isWorkDay) {
+                    $workingDaysAbsentCount++;
+                }
+
+                // Create a new report entry for this day
+                $enhancedReport[] = [
+                    'date' => $dateStr,
+                    'day_of_week' => $date->format('l'),
+                    'clock_in' => null,
+                    'clock_out' => null,
+                    'clock_in_method' => null,
+                    'clock_out_method' => null,
+                    'location' => null,
+                    'total_hours' => null,
+                    'total_minutes' => null,
+                    'hours_formatted' => null,
+                    'is_holiday' => $isHoliday,
+                    'holiday_info' => $isHoliday ? [
+                        'id' => $holidayInfo->id,
+                        'name' => $holidayInfo->name,
+                        'description' => $holidayInfo->description,
+                        'is_recurring' => $holidayInfo->is_recurring
+                    ] : null,
+                    'scheduled_hours' => $isWorkDay ? [
+                        'start_time' => $scheduledStartTime ? $scheduledStartTime->format('H:i:s') : null,
+                        'end_time' => $scheduledEndTime ? $scheduledEndTime->format('H:i:s') : null,
+                        'duration_minutes' => $scheduledMinutes,
+                        'hours_formatted' => $scheduledMinutes ?
+                            sprintf("%d:%02d", floor($scheduledMinutes / 60), $scheduledMinutes % 60) : null
+                    ] : null,
+                    'task_logs' => [],
+                    'task_logs_count' => 0
+                ];
+            }
         }
 
-        // Summary statistics
-        $presentDays = count($groupedAttendances);
-        $absentDays = $totalDaysInRange - $presentDays;
-        $totalWorkMinutes = array_sum(array_column($report, 'total_minutes'));
+        // Sort the enhanced report by date
+        usort($enhancedReport, function ($a, $b) {
+            return strcmp($a['date'], $b['date']);
+        });
 
-        // Calculate attendance rate
-        $attendanceRate = $totalDaysInRange > 0 ? ($presentDays / $totalDaysInRange) * 100 : 0;
+        // Calculate attendance percentage (for working days only)
+        $attendanceRate = $workDays > 0 ? ($workingDaysPresentCount / $workDays) * 100 : 0;
 
-        return response()->json([
+        // Calculate overtime / undertime
+        $overtimeMinutes = $totalActualMinutes - $totalScheduledMinutes;
+
+        $response = [
             'status' => true,
             'message' => 'Attendance report generated successfully',
             'data' => [
-                'daily_records' => $report,
+                'user' => [
+                    'id' => $reportUser->id,
+                    'name' => $reportUser->name,
+                    'email' => $reportUser->email,
+                    'role' => $reportUser->role,
+                    'position' => $reportUser->position,
+                    'department' => $reportUser->department ? [
+                        'id' => $reportUser->department->id,
+                        'name' => $reportUser->department->name
+                    ] : null
+                ],
+                'daily_records' => $enhancedReport,
                 'summary' => [
                     'date_range' => [
-                        'start_date' => $request->start_date,
-                        'end_date' => $request->end_date,
+                        'start_date' => $startDate->toDateString(),
+                        'end_date' => $endDate->toDateString(),
                         'total_days' => $totalDaysInRange,
                         'weekdays' => $weekdays,
-                        'weekends' => $weekends
+                        'weekends' => $weekends,
+                        'holidays' => $holidayCount,
+                        'work_days' => $workDays
                     ],
                     'attendance' => [
-                        'present_days' => $presentDays,
-                        'absent_days' => $absentDays,
+                        'present_days' => $workingDaysPresentCount,
+                        'absent_days' => $workingDaysAbsentCount,
                         'attendance_rate' => round($attendanceRate, 2) . '%',
                     ],
                     'work_hours' => [
-                        'total_hours' => floor($totalWorkMinutes / 60),
-                        'total_minutes' => $totalWorkMinutes % 60,
-                        'hours_formatted' => sprintf("%d:%02d", floor($totalWorkMinutes / 60), $totalWorkMinutes % 60),
-                        'average_hours_per_day' => $presentDays > 0 ? round($totalWorkMinutes / $presentDays / 60, 2) : 0
+                        'scheduled' => [
+                            'total_hours' => floor($totalScheduledMinutes / 60),
+                            'total_minutes' => $totalScheduledMinutes % 60,
+                            'hours_formatted' => sprintf("%d:%02d", floor($totalScheduledMinutes / 60), $totalScheduledMinutes % 60)
+                        ],
+                        'actual' => [
+                            'total_hours' => floor($totalActualMinutes / 60),
+                            'total_minutes' => $totalActualMinutes % 60,
+                            'hours_formatted' => sprintf("%d:%02d", floor($totalActualMinutes / 60), $totalActualMinutes % 60)
+                        ],
+                        'difference' => [
+                            'total_minutes' => $overtimeMinutes,
+                            'hours_formatted' => sprintf(
+                                "%s%d:%02d",
+                                $overtimeMinutes < 0 ? "-" : "",
+                                floor(abs($overtimeMinutes) / 60),
+                                abs($overtimeMinutes) % 60
+                            ),
+                            'type' => $overtimeMinutes > 0 ? 'overtime' : ($overtimeMinutes < 0 ? 'undertime' : 'exact')
+                        ],
+                        'average_hours_per_day' => $workingDaysPresentCount > 0 ?
+                            round($totalActualMinutes / $workingDaysPresentCount / 60, 2) : 0
                     ]
                 ]
             ]
-        ]);
+        ];
+
+        // Add report-generated timestamp
+        $response['data']['generated_at'] = Carbon::now()->toDateTimeString();
+
+        return response()->json($response);
+    }
+
+    /**
+     * Get attendance records for a specific user.
+     * Modified version of getAttendanceRecords that accepts a user_id parameter.
+     * 
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $user_id
+     * @return \Illuminate\Database\Eloquent\Collection
+     */
+    private function getAttendanceRecordsForUser(Request $request, $user_id)
+    {
+        $startDate = $request->start_date;
+        $endDate = $request->end_date;
+
+        $query = Attendance::query()
+            ->where('user_id', $user_id)
+            ->whereDate('created_at', '>=', $startDate)
+            ->whereDate('created_at', '<=', $endDate);
+
+        // Apply filters if provided
+        if ($request->has('filter_clock_type')) {
+            $query->where('clock_type', $request->filter_clock_type);
+        }
+
+        if ($request->has('filter_method')) {
+            $query->where('method', $request->filter_method);
+        }
+
+        if ($request->has('filter_location')) {
+            $query->where('location', 'like', '%' . $request->filter_location . '%');
+        }
+
+        // Conditionally include task logs
+        if ($request->input('include_task_logs', true)) {
+            $query->with('taskLogs');
+        }
+
+        return $query->orderBy('created_at', 'asc')->get();
     }
 }

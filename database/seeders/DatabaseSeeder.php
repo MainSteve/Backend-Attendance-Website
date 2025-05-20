@@ -24,5 +24,8 @@ class DatabaseSeeder extends Seeder
             DepartmentSeeder::class,
             // Other seeders...
         ]);
+        
+        $this->call(WorkingHoursSeeder::class);
+        $this->call(HolidaysSeeder::class);
     }
 }
