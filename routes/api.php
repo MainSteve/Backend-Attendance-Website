@@ -5,6 +5,8 @@ use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\WorkingHourController;
 use App\Http\Controllers\HolidayController;
+use App\Http\Controllers\LeaveQuotaController;
+use App\Http\Controllers\LeaveRequestController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\UserController;
 use Illuminate\Auth\Events\Registered;
@@ -26,7 +28,7 @@ Route::middleware('auth:sanctum')->group(function () {
     
     // IMPORTANT: Order matters here - more specific routes must come first!
     
-    // Get today's attendance for the authenticated employee
+    // Attendance routes
     Route::get('/attendance/today', [AttendanceController::class, 'today']);
     // Get attendance records for a date range
     Route::get('/attendance/report', [AttendanceController::class, 'report']);
@@ -46,8 +48,19 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/holidays', [HolidayController::class, 'index']);
     Route::get('/holidays/{id}', [HolidayController::class, 'show']);
     
+    // Leave quota routes
+    Route::get('/leave-quotas', [LeaveQuotaController::class, 'index']);
+    Route::get('/leave-summary', [LeaveRequestController::class, 'getQuotaSummary']);
+    
+    // Leave request routes
+    Route::get('/leave-requests', [LeaveRequestController::class, 'index']);
+    Route::post('/leave-requests', [LeaveRequestController::class, 'store']);
+    Route::get('/leave-requests/{id}', [LeaveRequestController::class, 'show']);
+    Route::post('/leave-requests/{id}/cancel', [LeaveRequestController::class, 'cancel']);
+    
     // Admin only routes
     Route::middleware('role:admin')->group(function () {
+        // Department and user management
         Route::apiResource('departments', DepartmentController::class)->except(['index']);
         Route::apiResource('users', UserController::class);
         
@@ -63,5 +76,15 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::patch('/holidays/{id}', [HolidayController::class, 'update']);
         Route::delete('/holidays/{id}', [HolidayController::class, 'destroy']);
         Route::post('/holidays/process-conflicts', [HolidayController::class, 'processConflicts']);
+        
+        // Admin-only leave quota routes
+        Route::post('/leave-quotas', [LeaveQuotaController::class, 'store']);
+        Route::get('/leave-quotas/{id}', [LeaveQuotaController::class, 'show']);
+        Route::put('/leave-quotas/{id}', [LeaveQuotaController::class, 'update']);
+        Route::post('/leave-quotas/generate', [LeaveQuotaController::class, 'generateYearlyQuotas']);
+        
+        // Admin-only leave request routes
+        Route::post('/leave-requests/{id}/status', [LeaveRequestController::class, 'updateStatus']);
+        Route::delete('/leave-requests/{id}', [LeaveRequestController::class, 'destroy']);
     });
 });

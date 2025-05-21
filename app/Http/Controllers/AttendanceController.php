@@ -12,6 +12,8 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use App\Models\WorkingHour;
 use App\Models\Holiday;
+use App\Models\LeaveQuota;
+use App\Models\LeaveRequest;
 
 const VALIDATION_FAILED_MESSAGE = 'Validation failed';
 
@@ -254,7 +256,7 @@ class AttendanceController extends Controller
             $inTime = Carbon::parse($clockIn->created_at);
             $outTime = Carbon::parse($clockOut->created_at);
             $workDuration = [
-                'hours' => $outTime->diffInHours($inTime),
+                'hours' => floor($outTime->diffInMinutes($inTime)),
                 'minutes' => $outTime->diffInMinutes($inTime) % 60,
                 'total_minutes' => $outTime->diffInMinutes($inTime)
             ];
@@ -349,69 +351,6 @@ class AttendanceController extends Controller
         });
     }
 
-    private function processDailyStats($groupedAttendances, $includeTaskLogs = true)
-    {
-        // Process the data to compute daily stats
-        $report = [];
-        foreach ($groupedAttendances as $date => $records) {
-            $clockIn = $records->where('clock_type', 'in')->first();
-            $clockOut = $records->where('clock_type', 'out')->last();
-
-            $totalHours = null;
-            $totalMinutes = null;
-            if ($clockIn && $clockOut) {
-                $inTime = Carbon::parse($clockIn->created_at);
-                $outTime = Carbon::parse($clockOut->created_at);
-                $totalMinutes = $outTime->diffInMinutes($inTime);
-                $totalHours = floor($totalMinutes / 60);
-            }
-
-            // Get task logs for this day if requested
-            $taskLogs = [];
-            if ($includeTaskLogs) {
-                foreach ($records as $record) {
-                    if ($record->relationLoaded('taskLogs')) {
-                        foreach ($record->taskLogs as $log) {
-                            $taskLogs[] = [
-                                'id' => $log->id,
-                                'description' => $log->description,
-                                'photo_url' => $log->photo_url,
-                                'created_at' => $log->created_at
-                            ];
-                        }
-                    }
-                }
-            }
-
-            $reportEntry = [
-                'date' => $date,
-                'day_of_week' => Carbon::parse($date)->format('l'),
-                'clock_in' => $clockIn ? Carbon::parse($clockIn->created_at)->format('H:i:s') : null,
-                'clock_out' => $clockOut ? Carbon::parse($clockOut->created_at)->format('H:i:s') : null,
-                'clock_in_method' => $clockIn ? $clockIn->method : null,
-                'clock_out_method' => $clockOut ? $clockOut->method : null,
-                'location' => $clockIn ? $clockIn->location : null,
-                'total_hours' => $totalHours,
-                'total_minutes' => $totalMinutes,
-                'hours_formatted' => $totalHours !== null ? sprintf("%d:%02d", $totalHours, $totalMinutes % 60) : null,
-            ];
-
-            if ($includeTaskLogs) {
-                $reportEntry['task_logs'] = $taskLogs;
-                $reportEntry['task_logs_count'] = count($taskLogs);
-            }
-
-            $report[] = $reportEntry;
-        }
-        return $report;
-    }
-
-    /**
-     * Get attendance report for a date range, taking holidays and working hours into account.
-     *
-     * @param  \Illuminate\Http\Request  $request
-     * @return \Illuminate\Http\JsonResponse
-     */
     /**
      * Get attendance report for a date range, taking holidays and working hours into account.
      * Admins can view reports for any user by providing a user_id parameter.
@@ -515,6 +454,33 @@ class AttendanceController extends Controller
             }
         }
 
+        // Get leave requests in this date range
+        $leaveRequests = LeaveRequest::where('user_id', $user_id)
+            ->where('status', 'approved')
+            ->where(function ($query) use ($startDate, $endDate) {
+                // Requests that start within the range
+                $query->whereBetween('start_date', [$startDate->toDateString(), $endDate->toDateString()])
+                    // Or requests that end within the range
+                    ->orWhereBetween('end_date', [$startDate->toDateString(), $endDate->toDateString()])
+                    // Or requests that span the entire range
+                    ->orWhere(function ($q) use ($startDate, $endDate) {
+                        $q->where('start_date', '<=', $startDate->toDateString())
+                            ->where('end_date', '>=', $endDate->toDateString());
+                    });
+            })->get();
+
+        // Map leave requests to their dates for easy lookup
+        $leaveDates = [];
+        foreach ($leaveRequests as $leave) {
+            $leaveStartDate = Carbon::parse($leave->start_date);
+            $leaveEndDate = Carbon::parse($leave->end_date);
+
+            for ($date = $leaveStartDate->copy(); $date->lte($leaveEndDate); $date->addDay()) {
+                $formattedDate = $date->toDateString();
+                $leaveDates[$formattedDate] = $leave;
+            }
+        }
+
         // Get working hours for the user
         $workingHours = WorkingHour::where('user_id', $user_id)->get()->keyBy('day_of_week');
 
@@ -525,11 +491,17 @@ class AttendanceController extends Controller
         $workDays = 0;
         $workingDaysPresentCount = 0;
         $workingDaysAbsentCount = 0;
-        $holidayCount = count($holidayDates);
+        $workingDaysLeaveCount = 0;
+        $holidayCount = count(array_unique(array_keys($holidayDates)));
         $weekends = 0;
         $weekdays = 0;
         $totalScheduledMinutes = 0;
         $totalActualMinutes = 0;
+        $leaveCountByType = [
+            'izin' => 0,
+            'sakit' => 0,
+            'cuti' => 0
+        ];
 
         // Enhanced daily records with working hours and holiday info
         $enhancedReport = [];
@@ -543,7 +515,11 @@ class AttendanceController extends Controller
             $isHoliday = isset($holidayDates[$dateStr]);
             $holidayInfo = $isHoliday ? $holidayDates[$dateStr] : null;
 
-            // Check if this is a work day (has working hours and not a holiday)
+            // Check if this is a leave day
+            $isLeave = isset($leaveDates[$dateStr]);
+            $leaveInfo = $isLeave ? $leaveDates[$dateStr] : null;
+
+            // Check if this is a work day (has working hours and not a holiday and not on leave)
             $hasWorkingHours = isset($workingHours[$dayOfWeek]);
             $isWorkDay = $hasWorkingHours && !$isHoliday;
 
@@ -563,10 +539,31 @@ class AttendanceController extends Controller
                 $scheduledEndTime = isset($workingHours[$dayOfWeek]) ?
                     Carbon::parse($workingHours[$dayOfWeek]->end_time) : null;
 
-                $scheduledMinutes = $scheduledStartTime && $scheduledEndTime ?
-                    $scheduledEndTime->diffInMinutes($scheduledStartTime) : 0;
+                // FIX: Ensure we calculate the correct positive duration
+                $scheduledMinutes = 0;
+                if ($scheduledStartTime && $scheduledEndTime) {
+                    // Create today's date with these times for proper comparison
+                    $startDateTime = Carbon::today()->setTimeFromTimeString($scheduledStartTime->format('H:i:s'));
+                    $endDateTime = Carbon::today()->setTimeFromTimeString($scheduledEndTime->format('H:i:s'));
+
+                    // Handle cases where end time might be on the next day
+                    if ($endDateTime->lt($startDateTime)) {
+                        $endDateTime->addDay();
+                    }
+
+                    $scheduledMinutes = $startDateTime->diffInMinutes($endDateTime);
+                }
 
                 $totalScheduledMinutes += $scheduledMinutes;
+
+                // Count leave days by type
+                if ($isLeave && $isWorkDay) {
+                    $workingDaysLeaveCount++;
+                    $leaveType = $leaveInfo->type;
+                    if (isset($leaveCountByType[$leaveType])) {
+                        $leaveCountByType[$leaveType]++;
+                    }
+                }
             }
 
             // Find the existing report entry for this date or create a new one
@@ -580,12 +577,26 @@ class AttendanceController extends Controller
 
             if ($dayReport) {
                 // Day exists in attendance record
-                if ($isWorkDay) {
+                if ($isWorkDay && !$isLeave) {
                     $workingDaysPresentCount++;
-                    $totalActualMinutes += $dayReport['total_minutes'] ?? 0;
+
+                    // FIX: Ensure we're adding positive minutes and using integer values
+                    $actualMinutes = isset($dayReport['total_minutes']) ? (int)abs($dayReport['total_minutes']) : 0;
+                    $totalActualMinutes += $actualMinutes;
+
+                    // FIX: Correct the total_minutes and total_hours in the day report
+                    if (isset($dayReport['total_minutes'])) {
+                        $dayReport['total_minutes'] = $actualMinutes;
+                        $dayReport['total_hours'] = (int)floor($actualMinutes / 60);
+                        $dayReport['hours_formatted'] = sprintf(
+                            "%d:%02d",
+                            floor($actualMinutes / 60),
+                            $actualMinutes % 60
+                        );
+                    }
                 }
 
-                // Add working hours and holiday info to the report
+                // Add working hours, holiday and leave info to the report
                 $dayReport['is_holiday'] = $isHoliday;
                 $dayReport['holiday_info'] = $isHoliday ? [
                     'id' => $holidayInfo->id,
@@ -594,19 +605,48 @@ class AttendanceController extends Controller
                     'is_recurring' => $holidayInfo->is_recurring
                 ] : null;
 
+                $dayReport['is_leave'] = $isLeave;
+                $dayReport['leave_info'] = $isLeave ? [
+                    'id' => $leaveInfo->id,
+                    'type' => $leaveInfo->type,
+                    'reason' => $leaveInfo->reason,
+                    'start_date' => $leaveInfo->start_date,
+                    'end_date' => $leaveInfo->end_date,
+                    'duration' => $leaveInfo->getDurationAttribute()
+                ] : null;
+
+                // FIX: Calculate correct scheduled hours
+                $scheduledHoursFormatted = null;
+                if ($isWorkDay && $scheduledStartTime && $scheduledEndTime) {
+                    $scheduledHoursFormatted = sprintf(
+                        "%d:%02d",
+                        floor($scheduledMinutes / 60),
+                        $scheduledMinutes % 60
+                    );
+                }
+
                 $dayReport['scheduled_hours'] = $isWorkDay ? [
                     'start_time' => $scheduledStartTime ? $scheduledStartTime->format('H:i:s') : null,
                     'end_time' => $scheduledEndTime ? $scheduledEndTime->format('H:i:s') : null,
-                    'duration_minutes' => $scheduledMinutes,
-                    'hours_formatted' => $scheduledMinutes ?
-                        sprintf("%d:%02d", floor($scheduledMinutes / 60), $scheduledMinutes % 60) : null
+                    'duration_minutes' => (int)$scheduledMinutes, // Cast to integer to avoid decimal values
+                    'hours_formatted' => $scheduledHoursFormatted
                 ] : null;
 
                 $enhancedReport[] = $dayReport;
             } else {
                 // Day doesn't exist in attendance records
-                if ($isWorkDay) {
+                if ($isWorkDay && !$isLeave) {
                     $workingDaysAbsentCount++;
+                }
+
+                // FIX: Calculate correct scheduled hours for new entry
+                $scheduledHoursFormatted = null;
+                if ($isWorkDay && $scheduledStartTime && $scheduledEndTime) {
+                    $scheduledHoursFormatted = sprintf(
+                        "%d:%02d",
+                        floor($scheduledMinutes / 60),
+                        $scheduledMinutes % 60
+                    );
                 }
 
                 // Create a new report entry for this day
@@ -618,9 +658,9 @@ class AttendanceController extends Controller
                     'clock_in_method' => null,
                     'clock_out_method' => null,
                     'location' => null,
-                    'total_hours' => null,
-                    'total_minutes' => null,
-                    'hours_formatted' => null,
+                    'total_hours' => 0,
+                    'total_minutes' => 0,
+                    'hours_formatted' => "0:00",
                     'is_holiday' => $isHoliday,
                     'holiday_info' => $isHoliday ? [
                         'id' => $holidayInfo->id,
@@ -628,12 +668,20 @@ class AttendanceController extends Controller
                         'description' => $holidayInfo->description,
                         'is_recurring' => $holidayInfo->is_recurring
                     ] : null,
+                    'is_leave' => $isLeave,
+                    'leave_info' => $isLeave ? [
+                        'id' => $leaveInfo->id,
+                        'type' => $leaveInfo->type,
+                        'reason' => $leaveInfo->reason,
+                        'start_date' => $leaveInfo->start_date,
+                        'end_date' => $leaveInfo->end_date,
+                        'duration' => $leaveInfo->getDurationAttribute()
+                    ] : null,
                     'scheduled_hours' => $isWorkDay ? [
                         'start_time' => $scheduledStartTime ? $scheduledStartTime->format('H:i:s') : null,
                         'end_time' => $scheduledEndTime ? $scheduledEndTime->format('H:i:s') : null,
-                        'duration_minutes' => $scheduledMinutes,
-                        'hours_formatted' => $scheduledMinutes ?
-                            sprintf("%d:%02d", floor($scheduledMinutes / 60), $scheduledMinutes % 60) : null
+                        'duration_minutes' => (int)$scheduledMinutes,
+                        'hours_formatted' => $scheduledHoursFormatted
                     ] : null,
                     'task_logs' => [],
                     'task_logs_count' => 0
@@ -649,8 +697,24 @@ class AttendanceController extends Controller
         // Calculate attendance percentage (for working days only)
         $attendanceRate = $workDays > 0 ? ($workingDaysPresentCount / $workDays) * 100 : 0;
 
-        // Calculate overtime / undertime
+        // FIX: Calculate correct overtime/undertime
         $overtimeMinutes = $totalActualMinutes - $totalScheduledMinutes;
+
+        // Get leave quota info for the user
+        $currentYear = Carbon::now()->year;
+        $leaveQuota = LeaveQuota::where('user_id', $user_id)
+            ->where('year', $currentYear)
+            ->first();
+
+        if (!$leaveQuota) {
+            $leaveQuota = new LeaveQuota([
+                'user_id' => $user_id,
+                'year' => $currentYear,
+                'total_quota' => 0,
+                'used_quota' => 0,
+                'remaining_quota' => 0
+            ]);
+        }
 
         $response = [
             'status' => true,
@@ -672,26 +736,28 @@ class AttendanceController extends Controller
                     'date_range' => [
                         'start_date' => $startDate->toDateString(),
                         'end_date' => $endDate->toDateString(),
-                        'total_days' => $totalDaysInRange,
-                        'weekdays' => $weekdays,
-                        'weekends' => $weekends,
-                        'holidays' => $holidayCount,
-                        'work_days' => $workDays
+                        'total_days' => (int)$totalDaysInRange,
+                        'weekdays' => (int)$weekdays,
+                        'weekends' => (int)$weekends,
+                        'holidays' => (int)$holidayCount,
+                        'work_days' => (int)$workDays
                     ],
                     'attendance' => [
                         'present_days' => $workingDaysPresentCount,
                         'absent_days' => $workingDaysAbsentCount,
+                        'leave_days' => $workingDaysLeaveCount,
+                        'leave_by_type' => $leaveCountByType,
                         'attendance_rate' => round($attendanceRate, 2) . '%',
                     ],
                     'work_hours' => [
                         'scheduled' => [
                             'total_hours' => floor($totalScheduledMinutes / 60),
-                            'total_minutes' => $totalScheduledMinutes % 60,
+                            'total_minutes' => (int)($totalScheduledMinutes % 60),
                             'hours_formatted' => sprintf("%d:%02d", floor($totalScheduledMinutes / 60), $totalScheduledMinutes % 60)
                         ],
                         'actual' => [
                             'total_hours' => floor($totalActualMinutes / 60),
-                            'total_minutes' => $totalActualMinutes % 60,
+                            'total_minutes' => (int)($totalActualMinutes % 60),
                             'hours_formatted' => sprintf("%d:%02d", floor($totalActualMinutes / 60), $totalActualMinutes % 60)
                         ],
                         'difference' => [
@@ -706,6 +772,15 @@ class AttendanceController extends Controller
                         ],
                         'average_hours_per_day' => $workingDaysPresentCount > 0 ?
                             round($totalActualMinutes / $workingDaysPresentCount / 60, 2) : 0
+                    ],
+                    'leave_quota' => [
+                        'year' => $currentYear,
+                        'total' => $leaveQuota->total_quota,
+                        'used' => $leaveQuota->used_quota,
+                        'remaining' => $leaveQuota->remaining_quota,
+                        'percentage_used' => $leaveQuota->total_quota > 0
+                            ? round(($leaveQuota->used_quota / $leaveQuota->total_quota) * 100, 2)
+                            : 0
                     ]
                 ]
             ]
@@ -754,5 +829,77 @@ class AttendanceController extends Controller
         }
 
         return $query->orderBy('created_at', 'asc')->get();
+    }
+
+    /**
+     * Process the data to compute daily stats with corrected time calculations
+     */
+    private function processDailyStats($groupedAttendances, $includeTaskLogs = true)
+    {
+        // Process the data to compute daily stats
+        $report = [];
+        foreach ($groupedAttendances as $date => $records) {
+            $clockIn = $records->where('clock_type', 'in')->first();
+            $clockOut = $records->where('clock_type', 'out')->last();
+
+            $totalMinutes = 0; // Default to 0 instead of null
+            $totalHours = 0;   // Default to 0 instead of null
+            $hoursFormatted = "0:00"; // Default formatted value
+
+            if ($clockIn && $clockOut) {
+                $inTime = Carbon::parse($clockIn->created_at);
+                $outTime = Carbon::parse($clockOut->created_at);
+
+                // FIX: Ensure proper time difference calculation
+                if ($outTime->lt($inTime)) {
+                    // If clock-out time is before clock-in time (error or midnight crossing)
+                    // Just set to 0 or handle as needed for your business logic
+                    $totalMinutes = 0;
+                } else {
+                    $totalMinutes = $outTime->diffInMinutes($inTime);
+                }
+
+                $totalHours = floor($totalMinutes / 60);
+                $hoursFormatted = sprintf("%d:%02d", $totalHours, $totalMinutes % 60);
+            }
+
+            // Get task logs for this day if requested
+            $taskLogs = [];
+            if ($includeTaskLogs) {
+                foreach ($records as $record) {
+                    if ($record->relationLoaded('taskLogs')) {
+                        foreach ($record->taskLogs as $log) {
+                            $taskLogs[] = [
+                                'id' => $log->id,
+                                'description' => $log->description,
+                                'photo_url' => $log->photo_url,
+                                'created_at' => $log->created_at
+                            ];
+                        }
+                    }
+                }
+            }
+
+            $reportEntry = [
+                'date' => $date,
+                'day_of_week' => Carbon::parse($date)->format('l'),
+                'clock_in' => $clockIn ? Carbon::parse($clockIn->created_at)->format('H:i:s') : null,
+                'clock_out' => $clockOut ? Carbon::parse($clockOut->created_at)->format('H:i:s') : null,
+                'clock_in_method' => $clockIn ? $clockIn->method : null,
+                'clock_out_method' => $clockOut ? $clockOut->method : null,
+                'location' => $clockIn ? $clockIn->location : null,
+                'total_hours' => (int)$totalHours, // Cast to integer
+                'total_minutes' => (int)$totalMinutes, // Cast to integer
+                'hours_formatted' => $hoursFormatted,
+            ];
+
+            if ($includeTaskLogs) {
+                $reportEntry['task_logs'] = $taskLogs;
+                $reportEntry['task_logs_count'] = count($taskLogs);
+            }
+
+            $report[] = $reportEntry;
+        }
+        return $report;
     }
 }
