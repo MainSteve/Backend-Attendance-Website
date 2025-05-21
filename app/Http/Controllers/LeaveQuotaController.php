@@ -21,10 +21,10 @@ class LeaveQuotaController extends Controller
     {
         $currentUser = Auth::user();
         $isAdmin = $currentUser->role === 'admin';
-        
+
         // Build the query
         $query = LeaveQuota::with('user');
-        
+
         // For non-admin users, only show their own quotas
         if (!$isAdmin) {
             $query->where('user_id', $currentUser->id);
@@ -32,7 +32,7 @@ class LeaveQuotaController extends Controller
             // Admin can filter by user_id
             $query->where('user_id', $request->user_id);
         }
-        
+
         // Filter by year
         if ($request->has('year')) {
             $query->where('year', $request->year);
@@ -40,16 +40,16 @@ class LeaveQuotaController extends Controller
             // Default to current year
             $query->where('year', now()->year);
         }
-        
+
         $leaveQuotas = $query->get();
-        
+
         return response()->json([
             'status' => true,
             'message' => 'Leave quotas retrieved successfully',
             'data' => $leaveQuotas
         ]);
     }
-    
+
     /**
      * Display a specific leave quota.
      *
@@ -60,16 +60,16 @@ class LeaveQuotaController extends Controller
     {
         $currentUser = Auth::user();
         $isAdmin = $currentUser->role === 'admin';
-        
+
         $leaveQuota = LeaveQuota::with('user')->find($id);
-        
+
         if (!$leaveQuota) {
             return response()->json([
                 'status' => false,
                 'message' => 'Leave quota not found'
             ], 404);
         }
-        
+
         // Check if the user has permission to view this quota
         if (!$isAdmin && $leaveQuota->user_id !== $currentUser->id) {
             return response()->json([
@@ -77,14 +77,14 @@ class LeaveQuotaController extends Controller
                 'message' => 'You do not have permission to view this leave quota'
             ], 403);
         }
-        
+
         return response()->json([
             'status' => true,
             'message' => 'Leave quota retrieved successfully',
             'data' => $leaveQuota
         ]);
     }
-    
+
     /**
      * Store a new leave quota.
      * Admin only endpoint.
@@ -99,7 +99,7 @@ class LeaveQuotaController extends Controller
             'year' => 'required|integer|min:2020|max:2050',
             'total_quota' => 'required|integer|min:0|max:365',
         ]);
-        
+
         if ($validator->fails()) {
             return response()->json([
                 'status' => false,
@@ -107,12 +107,12 @@ class LeaveQuotaController extends Controller
                 'errors' => $validator->errors()
             ], 422);
         }
-        
+
         // Check if a quota already exists for this user and year
         $existingQuota = LeaveQuota::where('user_id', $request->user_id)
             ->where('year', $request->year)
             ->first();
-            
+
         if ($existingQuota) {
             return response()->json([
                 'status' => false,
@@ -120,7 +120,7 @@ class LeaveQuotaController extends Controller
                 'data' => $existingQuota
             ], 422);
         }
-        
+
         // Create the new leave quota
         $leaveQuota = LeaveQuota::create([
             'user_id' => $request->user_id,
@@ -129,14 +129,14 @@ class LeaveQuotaController extends Controller
             'used_quota' => 0,
             'remaining_quota' => $request->total_quota
         ]);
-        
+
         return response()->json([
             'status' => true,
             'message' => 'Leave quota created successfully',
             'data' => $leaveQuota
         ], 201);
     }
-    
+
     /**
      * Update a leave quota.
      * Admin only endpoint.
@@ -148,18 +148,18 @@ class LeaveQuotaController extends Controller
     public function update(Request $request, $id)
     {
         $leaveQuota = LeaveQuota::find($id);
-        
+
         if (!$leaveQuota) {
             return response()->json([
                 'status' => false,
                 'message' => 'Leave quota not found'
             ], 404);
         }
-        
+
         $validator = Validator::make($request->all(), [
             'total_quota' => 'required|integer|min:' . $leaveQuota->used_quota . '|max:365',
         ]);
-        
+
         if ($validator->fails()) {
             return response()->json([
                 'status' => false,
@@ -167,18 +167,18 @@ class LeaveQuotaController extends Controller
                 'errors' => $validator->errors()
             ], 422);
         }
-        
+
         // Update the quota
         $leaveQuota->total_quota = $request->total_quota;
         $leaveQuota->updateRemainingQuota();
-        
+
         return response()->json([
             'status' => true,
             'message' => 'Leave quota updated successfully',
             'data' => $leaveQuota
         ]);
     }
-    
+
     /**
      * Generate leave quotas for all users for a specific year.
      * Admin only endpoint.
@@ -192,7 +192,7 @@ class LeaveQuotaController extends Controller
             'year' => 'required|integer|min:2020|max:2050',
             'default_quota' => 'required|integer|min:0|max:365',
         ]);
-        
+
         if ($validator->fails()) {
             return response()->json([
                 'status' => false,
@@ -200,21 +200,21 @@ class LeaveQuotaController extends Controller
                 'errors' => $validator->errors()
             ], 422);
         }
-        
+
         $year = $request->year;
         $defaultQuota = $request->default_quota;
-        
-        // Get all users
-        $users = User::all();
+
+        // Get all users except admins
+        $users = User::where('role', '!=', 'admin')->get();
         $created = 0;
         $skipped = 0;
-        
+
         foreach ($users as $user) {
             // Check if quota already exists for this user and year
             $existingQuota = LeaveQuota::where('user_id', $user->id)
                 ->where('year', $year)
                 ->first();
-                
+
             if (!$existingQuota) {
                 // Create new quota
                 LeaveQuota::create([
@@ -224,13 +224,13 @@ class LeaveQuotaController extends Controller
                     'used_quota' => 0,
                     'remaining_quota' => $defaultQuota
                 ]);
-                
+
                 $created++;
             } else {
                 $skipped++;
             }
         }
-        
+
         return response()->json([
             'status' => true,
             'message' => "Generated leave quotas for $created users, skipped $skipped existing quotas",

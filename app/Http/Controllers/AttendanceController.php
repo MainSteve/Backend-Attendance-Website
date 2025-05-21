@@ -145,17 +145,46 @@ class AttendanceController extends Controller
             ], 422);
         }
 
+        $userId = Auth::id();
+        $today = Carbon::today();
+
         // Check if user already has a record of the same clock_type today
         if ($request->clock_type === 'in') {
-            $existingClockIn = Attendance::where('user_id', Auth::id())
+            $existingClockIn = Attendance::where('user_id', $userId)
                 ->where('clock_type', 'in')
-                ->whereDate('created_at', Carbon::today())
+                ->whereDate('created_at', $today)
                 ->exists();
 
             if ($existingClockIn) {
                 return response()->json([
                     'status' => false,
                     'message' => 'You have already clocked in today',
+                ], 422);
+            }
+        } elseif ($request->clock_type === 'out') {
+            // Check if user has clocked in today before allowing clock out
+            $existingClockIn = Attendance::where('user_id', $userId)
+                ->where('clock_type', 'in')
+                ->whereDate('created_at', $today)
+                ->exists();
+
+            if (!$existingClockIn) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'You must clock in before you can clock out',
+                ], 422);
+            }
+
+            // Check if user has already clocked out today
+            $existingClockOut = Attendance::where('user_id', $userId)
+                ->where('clock_type', 'out')
+                ->whereDate('created_at', $today)
+                ->exists();
+
+            if ($existingClockOut) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'You have already clocked out today',
                 ], 422);
             }
         }
@@ -521,7 +550,7 @@ class AttendanceController extends Controller
 
             // Check if this is a work day (has working hours and not a holiday and not on leave)
             $hasWorkingHours = isset($workingHours[$dayOfWeek]);
-            $isWorkDay = $hasWorkingHours && !$isHoliday;
+            $isWorkDay = $hasWorkingHours && !$isHoliday && !$isLeave; // Updated to consider leave days as non-work days
 
             // Update counters
             if ($date->isWeekday()) {
@@ -530,7 +559,9 @@ class AttendanceController extends Controller
                 $weekends++;
             }
 
-            if ($isWorkDay) {
+            if ($hasWorkingHours && !$isHoliday) {
+                // Count as a work day if it has working hours and is not a holiday
+                // (regardless of leave status)
                 $workDays++;
 
                 // Calculate scheduled hours for this day
@@ -539,25 +570,27 @@ class AttendanceController extends Controller
                 $scheduledEndTime = isset($workingHours[$dayOfWeek]) ?
                     Carbon::parse($workingHours[$dayOfWeek]->end_time) : null;
 
-                // FIX: Ensure we calculate the correct positive duration
-                $scheduledMinutes = 0;
-                if ($scheduledStartTime && $scheduledEndTime) {
-                    // Create today's date with these times for proper comparison
-                    $startDateTime = Carbon::today()->setTimeFromTimeString($scheduledStartTime->format('H:i:s'));
-                    $endDateTime = Carbon::today()->setTimeFromTimeString($scheduledEndTime->format('H:i:s'));
+                // Only calculate scheduled minutes if not on leave
+                if (!$isLeave) {
+                    // FIX: Ensure we calculate the correct positive duration
+                    $scheduledMinutes = 0;
+                    if ($scheduledStartTime && $scheduledEndTime) {
+                        // Create today's date with these times for proper comparison
+                        $startDateTime = Carbon::today()->setTimeFromTimeString($scheduledStartTime->format('H:i:s'));
+                        $endDateTime = Carbon::today()->setTimeFromTimeString($scheduledEndTime->format('H:i:s'));
 
-                    // Handle cases where end time might be on the next day
-                    if ($endDateTime->lt($startDateTime)) {
-                        $endDateTime->addDay();
+                        // Handle cases where end time might be on the next day
+                        if ($endDateTime->lt($startDateTime)) {
+                            $endDateTime->addDay();
+                        }
+
+                        $scheduledMinutes = $startDateTime->diffInMinutes($endDateTime);
+                        $totalScheduledMinutes += $scheduledMinutes;
                     }
-
-                    $scheduledMinutes = $startDateTime->diffInMinutes($endDateTime);
                 }
 
-                $totalScheduledMinutes += $scheduledMinutes;
-
                 // Count leave days by type
-                if ($isLeave && $isWorkDay) {
+                if ($isLeave) {
                     $workingDaysLeaveCount++;
                     $leaveType = $leaveInfo->type;
                     if (isset($leaveCountByType[$leaveType])) {
@@ -577,7 +610,7 @@ class AttendanceController extends Controller
 
             if ($dayReport) {
                 // Day exists in attendance record
-                if ($isWorkDay && !$isLeave) {
+                if ($isWorkDay) {
                     $workingDaysPresentCount++;
 
                     // FIX: Ensure we're adding positive minutes and using integer values
@@ -615,38 +648,72 @@ class AttendanceController extends Controller
                     'duration' => $leaveInfo->getDurationAttribute()
                 ] : null;
 
-                // FIX: Calculate correct scheduled hours
-                $scheduledHoursFormatted = null;
-                if ($isWorkDay && $scheduledStartTime && $scheduledEndTime) {
-                    $scheduledHoursFormatted = sprintf(
-                        "%d:%02d",
-                        floor($scheduledMinutes / 60),
-                        $scheduledMinutes % 60
-                    );
-                }
+                // FIX: Don't include scheduled hours for leave days
+                if (!$isLeave && $hasWorkingHours && !$isHoliday) {
+                    // Calculate correct scheduled hours
+                    $scheduledHoursFormatted = null;
+                    if ($scheduledStartTime && $scheduledEndTime) {
+                        $scheduledMinutes = $startDateTime->diffInMinutes($endDateTime);
+                        $scheduledHoursFormatted = sprintf(
+                            "%d:%02d",
+                            floor($scheduledMinutes / 60),
+                            $scheduledMinutes % 60
+                        );
+                    }
 
-                $dayReport['scheduled_hours'] = $isWorkDay ? [
-                    'start_time' => $scheduledStartTime ? $scheduledStartTime->format('H:i:s') : null,
-                    'end_time' => $scheduledEndTime ? $scheduledEndTime->format('H:i:s') : null,
-                    'duration_minutes' => (int)$scheduledMinutes, // Cast to integer to avoid decimal values
-                    'hours_formatted' => $scheduledHoursFormatted
-                ] : null;
+                    $dayReport['scheduled_hours'] = [
+                        'start_time' => $scheduledStartTime ? $scheduledStartTime->format('H:i:s') : null,
+                        'end_time' => $scheduledEndTime ? $scheduledEndTime->format('H:i:s') : null,
+                        'duration_minutes' => (int)$scheduledMinutes, // Cast to integer to avoid decimal values
+                        'hours_formatted' => $scheduledHoursFormatted
+                    ];
+                } else {
+                    // Set scheduled_hours to null for leave days
+                    $dayReport['scheduled_hours'] = null;
+                }
 
                 $enhancedReport[] = $dayReport;
             } else {
                 // Day doesn't exist in attendance records
-                if ($isWorkDay && !$isLeave) {
+                if ($isWorkDay) {
                     $workingDaysAbsentCount++;
                 }
 
                 // FIX: Calculate correct scheduled hours for new entry
                 $scheduledHoursFormatted = null;
-                if ($isWorkDay && $scheduledStartTime && $scheduledEndTime) {
-                    $scheduledHoursFormatted = sprintf(
-                        "%d:%02d",
-                        floor($scheduledMinutes / 60),
-                        $scheduledMinutes % 60
-                    );
+                $scheduledHours = null;
+
+                // Only include scheduled hours if not on leave
+                if (!$isLeave && $hasWorkingHours && !$isHoliday) {
+                    $scheduledStartTime = isset($workingHours[$dayOfWeek]) ?
+                        Carbon::parse($workingHours[$dayOfWeek]->start_time) : null;
+                    $scheduledEndTime = isset($workingHours[$dayOfWeek]) ?
+                        Carbon::parse($workingHours[$dayOfWeek]->end_time) : null;
+
+                    if ($scheduledStartTime && $scheduledEndTime) {
+                        // Create today's date with these times for proper comparison
+                        $startDateTime = Carbon::today()->setTimeFromTimeString($scheduledStartTime->format('H:i:s'));
+                        $endDateTime = Carbon::today()->setTimeFromTimeString($scheduledEndTime->format('H:i:s'));
+
+                        // Handle cases where end time might be on the next day
+                        if ($endDateTime->lt($startDateTime)) {
+                            $endDateTime->addDay();
+                        }
+
+                        $scheduledMinutes = $startDateTime->diffInMinutes($endDateTime);
+                        $scheduledHoursFormatted = sprintf(
+                            "%d:%02d",
+                            floor($scheduledMinutes / 60),
+                            $scheduledMinutes % 60
+                        );
+
+                        $scheduledHours = [
+                            'start_time' => $scheduledStartTime->format('H:i:s'),
+                            'end_time' => $scheduledEndTime->format('H:i:s'),
+                            'duration_minutes' => (int)$scheduledMinutes,
+                            'hours_formatted' => $scheduledHoursFormatted
+                        ];
+                    }
                 }
 
                 // Create a new report entry for this day
@@ -677,12 +744,7 @@ class AttendanceController extends Controller
                         'end_date' => $leaveInfo->end_date,
                         'duration' => $leaveInfo->getDurationAttribute()
                     ] : null,
-                    'scheduled_hours' => $isWorkDay ? [
-                        'start_time' => $scheduledStartTime ? $scheduledStartTime->format('H:i:s') : null,
-                        'end_time' => $scheduledEndTime ? $scheduledEndTime->format('H:i:s') : null,
-                        'duration_minutes' => (int)$scheduledMinutes,
-                        'hours_formatted' => $scheduledHoursFormatted
-                    ] : null,
+                    'scheduled_hours' => $scheduledHours, // Will be null for leave days
                     'task_logs' => [],
                     'task_logs_count' => 0
                 ];

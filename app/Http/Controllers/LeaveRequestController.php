@@ -248,7 +248,7 @@ class LeaveRequestController extends Controller
             }
             
             // Check if there's enough quota left
-            if ($leaveQuota->remaining_quota < $duration && $status === 'approved') {
+            if ($leaveQuota->remaining_quota >= $duration && $status === 'approved') {
                 return response()->json([
                     'status' => false,
                     'message' => 'Insufficient leave quota',
