@@ -12,6 +12,7 @@ use App\Http\Controllers\UserController;
 use Illuminate\Auth\Events\Registered;
 use App\Http\Controllers\Auth\RegisteredUserController;
 use App\Http\Controllers\QrCodeController;
+use App\Http\Controllers\AnnouncementController;
 
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
@@ -61,6 +62,11 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/attendance/qr/{token}', [QrCodeController::class, 'process']);
 
+    // Announcement routes for all authenticated users
+    Route::get('/announcements', [AnnouncementController::class, 'index']);
+    Route::get('/announcements/my-department', [AnnouncementController::class, 'myDepartmentAnnouncements']);
+    Route::get('/announcements/{announcement}', [AnnouncementController::class, 'show']);
+
     // Admin only routes
     Route::middleware('role:admin')->group(function () {
         // Department and user management
@@ -92,5 +98,13 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // QR code generation route
         Route::post('/qrcode/generate', [QrCodeController::class, 'generate']);
+
+        // Admin-only announcement routes
+        Route::post('/announcements', [AnnouncementController::class, 'store']); // POST with department_ids[]
+        Route::put('/announcements/{announcement}', [AnnouncementController::class, 'update']); // PUT with department_ids[]
+        Route::patch('/announcements/{announcement}', [AnnouncementController::class, 'update']); // PATCH with department_ids[]
+        Route::delete('/announcements/{announcement}', [AnnouncementController::class, 'destroy']);
+        Route::post('/announcements/{announcement}/toggle-active', [AnnouncementController::class, 'toggleActive']);
+        Route::get('/announcements-statistics', [AnnouncementController::class, 'statistics']);
     });
 });
