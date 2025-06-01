@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class LeaveRequest extends Model
 {
@@ -32,6 +33,12 @@ class LeaveRequest extends Model
         'created_at' => 'datetime',
     ];
 
+    protected $appends = [
+        'duration',
+        'has_proofs',
+        'proofs_count'
+    ];
+
     /**
      * Get the user that owns the leave request
      */
@@ -41,11 +48,68 @@ class LeaveRequest extends Model
     }
 
     /**
+     * Get all proofs for this leave request
+     */
+    public function proofs(): HasMany
+    {
+        return $this->hasMany(LeaveProof::class);
+    }
+
+    /**
+     * Get verified proofs for this leave request
+     */
+    public function verifiedProofs(): HasMany
+    {
+        return $this->hasMany(LeaveProof::class)->where('is_verified', true);
+    }
+
+    /**
+     * Get unverified proofs for this leave request
+     */
+    public function unverifiedProofs(): HasMany
+    {
+        return $this->hasMany(LeaveProof::class)->where('is_verified', false);
+    }
+
+    /**
      * Calculate the duration of the leave request in days
      */
     public function getDurationAttribute(): int
     {
         return $this->start_date->diffInDays($this->end_date) + 1;
+    }
+
+    /**
+     * Check if this leave request has any proofs
+     */
+    public function getHasProofsAttribute(): bool
+    {
+        return $this->proofs()->exists();
+    }
+
+    /**
+     * Get the count of proofs for this leave request
+     */
+    public function getProofsCountAttribute(): int
+    {
+        return $this->proofs()->count();
+    }
+
+    /**
+     * Check if this leave request has verified proofs
+     */
+    public function hasVerifiedProofs(): bool
+    {
+        return $this->verifiedProofs()->exists();
+    }
+
+    /**
+     * Check if this leave request requires proof
+     * For 'sakit' type, proof is usually required
+     */
+    public function requiresProof(): bool
+    {
+        return $this->type === 'sakit';
     }
 
     /**
@@ -70,5 +134,31 @@ class LeaveRequest extends Model
     public function scopeRejected($query)
     {
         return $query->where('status', 'rejected');
+    }
+
+    /**
+     * Scope to include leave requests with proofs
+     */
+    public function scopeWithProofs($query)
+    {
+        return $query->whereHas('proofs');
+    }
+
+    /**
+     * Scope to include leave requests without proofs
+     */
+    public function scopeWithoutProofs($query)
+    {
+        return $query->whereDoesntHave('proofs');
+    }
+
+    /**
+     * Scope to include leave requests with verified proofs
+     */
+    public function scopeWithVerifiedProofs($query)
+    {
+        return $query->whereHas('proofs', function ($query) {
+            $query->where('is_verified', true);
+        });
     }
 }

@@ -219,45 +219,48 @@ class LeaveRequestController extends Controller
             ], 422);
         }
         
-        // For 'cuti' type, check if there is sufficient quota
+        // Determine initial status based on leave type
         $status = 'pending';
         
-        // Admins can directly approve leave requests
+        // For 'sakit' type, auto-approve the request
+        if ($request->type === 'sakit') {
+            $status = 'approved';
+        }
+        
+        // Admins can directly set status for any type
         if ($isAdmin && $request->has('status') && in_array($request->status, self::LEAVE_STATUSES)) {
             $status = $request->status;
         }
         
-        if ($request->type === 'cuti') {
-            // Check quota if it's a 'cuti' type request
-            $currentYear = Carbon::now()->year;
+        // Check quota for both types before creating the request
+        $currentYear = Carbon::now()->year;
+        
+        // Get leave quota for the current year
+        $leaveQuota = LeaveQuota::where('user_id', $userId)
+            ->where('year', $currentYear)
+            ->first();
             
-            // Get leave quota for the current year
-            $leaveQuota = LeaveQuota::where('user_id', $userId)
-                ->where('year', $currentYear)
-                ->first();
-                
-            if (!$leaveQuota) {
-                // Create a new quota with default values if not exists
-                $leaveQuota = LeaveQuota::create([
-                    'user_id' => $userId,
-                    'year' => $currentYear,
-                    'total_quota' => 0, // Default value
-                    'used_quota' => 0,
-                    'remaining_quota' => 0
-                ]);
-            }
-            
-            // Check if there's enough quota left
-            if ($leaveQuota->remaining_quota >= $duration && $status === 'approved') {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Insufficient leave quota',
-                    'data' => [
-                        'requested_days' => $duration,
-                        'remaining_quota' => $leaveQuota->remaining_quota
-                    ]
-                ], 422);
-            }
+        if (!$leaveQuota) {
+            // Create a new quota with default values if not exists
+            $leaveQuota = LeaveQuota::create([
+                'user_id' => $userId,
+                'year' => $currentYear,
+                'total_quota' => 0, // Default value
+                'used_quota' => 0,
+                'remaining_quota' => 0
+            ]);
+        }
+        
+        // Check if there's enough quota left for both 'cuti' and 'sakit'
+        if ($leaveQuota->remaining_quota >= $duration) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Insufficient leave quota',
+                'data' => [
+                    'requested_days' => $duration,
+                    'remaining_quota' => $leaveQuota->remaining_quota
+                ]
+            ], 422);
         }
         
         // Create the leave request
@@ -273,8 +276,12 @@ class LeaveRequestController extends Controller
                 'status' => $status
             ]);
             
-            // Update quota if the request is auto-approved
-            if ($status === 'approved' && $request->type === 'cuti') {
+            // Update quota based on type and status
+            if ($request->type === 'sakit') {
+                // For 'sakit', always update quota immediately (since it's auto-approved)
+                $this->updateQuotaForApproval($leaveRequest);
+            } elseif ($request->type === 'cuti' && $status === 'approved') {
+                // For 'cuti', only update quota if it's approved
                 $this->updateQuotaForApproval($leaveRequest);
             }
             
@@ -341,6 +348,14 @@ class LeaveRequestController extends Controller
                 'message' => 'Leave request status unchanged',
                 'data' => $leaveRequest
             ]);
+        }
+        
+        // Prevent changing status of 'sakit' requests from 'approved'
+        if ($leaveRequest->type === 'sakit' && $oldStatus === 'approved' && $newStatus !== 'approved') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Cannot change status of approved sick leave requests'
+            ], 422);
         }
         
         DB::beginTransaction();
@@ -430,8 +445,8 @@ class LeaveRequestController extends Controller
         DB::beginTransaction();
         
         try {
-            // If it was approved and of type 'cuti', restore quota
-            if ($leaveRequest->status === 'approved' && $leaveRequest->type === 'cuti') {
+            // Restore quota for both types if they were approved
+            if ($leaveRequest->status === 'approved') {
                 $this->updateQuotaForRevocation($leaveRequest);
             }
             
@@ -479,8 +494,8 @@ class LeaveRequestController extends Controller
         DB::beginTransaction();
         
         try {
-            // If it was approved and of type 'cuti', restore quota
-            if ($leaveRequest->status === 'approved' && $leaveRequest->type === 'cuti') {
+            // Restore quota for both types if they were approved
+            if ($leaveRequest->status === 'approved') {
                 $this->updateQuotaForRevocation($leaveRequest);
             }
             
@@ -567,13 +582,11 @@ class LeaveRequestController extends Controller
         ];
         
         $byType = [
-            'izin' => 0,
             'sakit' => 0,
             'cuti' => 0
         ];
         
         $byDuration = [
-            'izin' => 0,
             'sakit' => 0,
             'cuti' => 0,
             'total' => 0
@@ -620,7 +633,7 @@ class LeaveRequestController extends Controller
                     'total' => $leaveQuota->total_quota,
                     'used' => $leaveQuota->used_quota,
                     'remaining' => $leaveQuota->remaining_quota,
-                    'percentage_used' => $leaveQuota->total_quota > 0 
+                    'percentage_used' => $leaveQuota->total_quota > 0
                         ? round(($leaveQuota->used_quota / $leaveQuota->total_quota) * 100, 2)
                         : 0
                 ],
@@ -642,7 +655,8 @@ class LeaveRequestController extends Controller
      */
     private function updateQuotaForApproval(LeaveRequest $leaveRequest)
     {
-        if ($leaveRequest->type !== 'cuti') {
+        // Now handles both 'cuti' and 'sakit' types
+        if (!in_array($leaveRequest->type, ['cuti', 'sakit'])) {
             return;
         }
         
@@ -677,7 +691,8 @@ class LeaveRequestController extends Controller
      */
     private function updateQuotaForRevocation(LeaveRequest $leaveRequest)
     {
-        if ($leaveRequest->type !== 'cuti') {
+        // Now handles both 'cuti' and 'sakit' types
+        if (!in_array($leaveRequest->type, ['cuti', 'sakit'])) {
             return;
         }
         
