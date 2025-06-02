@@ -253,10 +253,21 @@ class AttendanceController extends Controller
             ], 404);
         }
 
+        // Process task logs to include photo URLs
+        $taskLogs = $this->processTaskLogsWithPhotos($attendance->taskLogs);
+
+        // Add processed task logs to the response
+        $attendanceData = $attendance->toArray();
+        $attendanceData['task_logs'] = $taskLogs;
+        $attendanceData['task_logs_count'] = count($taskLogs);
+        $attendanceData['photos_count'] = count(array_filter($taskLogs, function ($log) {
+            return $log['has_photo'] && !is_null($log['photo_url']);
+        }));
+
         return response()->json([
             'status' => true,
             'message' => 'Attendance record retrieved successfully',
-            'data' => $attendance
+            'data' => $attendanceData
         ]);
     }
 
@@ -275,34 +286,29 @@ class AttendanceController extends Controller
             ->orderBy('created_at', 'asc')
             ->get();
 
-        // Check for clock in and clock out
         $clockIn = $todayAttendances->where('clock_type', 'in')->first();
         $clockOut = $todayAttendances->where('clock_type', 'out')->first();
 
-        // Calculate work duration if both clock in and out exist
         $workDuration = null;
         if ($clockIn && $clockOut) {
             $inTime = Carbon::parse($clockIn->created_at);
             $outTime = Carbon::parse($clockOut->created_at);
+            $totalMinutes = $outTime->diffInMinutes($inTime);
             $workDuration = [
-                'hours' => floor($outTime->diffInMinutes($inTime)),
-                'minutes' => $outTime->diffInMinutes($inTime) % 60,
-                'total_minutes' => $outTime->diffInMinutes($inTime)
+                'hours' => floor($totalMinutes / 60),
+                'minutes' => $totalMinutes % 60,
+                'total_minutes' => $totalMinutes,
+                'hours_formatted' => sprintf("%d:%02d", floor($totalMinutes / 60), $totalMinutes % 60)
             ];
         }
 
-        // Get task logs for today
-        $taskLogs = [];
+        // Get all task logs for today with photo URLs
+        $allTaskLogs = collect();
         foreach ($todayAttendances as $attendance) {
-            foreach ($attendance->taskLogs as $log) {
-                $taskLogs[] = [
-                    'id' => $log->id,
-                    'description' => $log->description,
-                    'photo_url' => $log->photo_url,
-                    'created_at' => $log->created_at
-                ];
-            }
+            $allTaskLogs = $allTaskLogs->merge($attendance->taskLogs);
         }
+
+        $taskLogs = $this->processTaskLogsWithPhotos($allTaskLogs);
 
         return response()->json([
             'status' => true,
@@ -310,7 +316,11 @@ class AttendanceController extends Controller
             'data' => [
                 'attendances' => $todayAttendances,
                 'work_duration' => $workDuration,
-                'task_logs' => $taskLogs
+                'task_logs' => $taskLogs,
+                'task_logs_count' => count($taskLogs),
+                'photos_count' => count(array_filter($taskLogs, function ($log) {
+                    return $log['has_photo'] && !is_null($log['photo_url']);
+                }))
             ]
         ]);
     }
@@ -334,7 +344,7 @@ class AttendanceController extends Controller
 
         $validator = Validator::make($request->all(), [
             'description' => 'required|string|max:1000',
-            'photo' => 'nullable|image|mimes:jpeg,png,jpg|max:5120' // 5MB max
+            'photo' => 'nullable|image|mimes:jpeg,png,jpg,webp|max:5120' // 5MB max, added webp support
         ]);
 
         if ($validator->fails()) {
@@ -345,26 +355,591 @@ class AttendanceController extends Controller
             ], 422);
         }
 
-        // Handle photo upload if present
+        // Handle photo upload to S3 if present
         $photoUrl = null;
+        $photoPath = null;
+        $temporaryUrl = null;
+
         if ($request->hasFile('photo') && $request->file('photo')->isValid()) {
-            $path = $request->file('photo')->store('task-logs', 'public');
-            $photoUrl = Storage::url($path);
+            try {
+                $file = $request->file('photo');
+                $userId = Auth::id();
+                $attendanceId = $attendance->id;
+
+                // Generate a unique filename with timestamp and user info
+                $timestamp = now()->format('Y-m-d_H-i-s');
+                $originalName = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
+                $extension = $file->getClientOriginalExtension();
+                $fileName = "user_{$userId}_attendance_{$attendanceId}_{$timestamp}_{$originalName}.{$extension}";
+
+                // Create the S3 path: task-logs/year/month/filename
+                $year = now()->format('Y');
+                $month = now()->format('m');
+
+                // Upload to S3 with private visibility for security
+                $photoPath = $file->storeAs(
+                    "task-logs/{$year}/{$month}",
+                    $fileName,
+                    ['disk' => 's3', 'visibility' => 'private']
+                );
+
+                if ($photoPath) {
+                    // Generate a temporary URL (valid for 24 hours) for immediate access
+                    $temporaryUrl = Storage::disk('s3')->temporaryUrl(
+                        $photoPath,
+                        now()->addHours(24)
+                    );
+                }
+            } catch (\Exception $e) {
+                // Log the error for debugging
+                \Log::error('S3 Upload failed for task log photo', [
+                    'user_id' => Auth::id(),
+                    'attendance_id' => $attendance->id,
+                    'error' => $e->getMessage()
+                ]);
+
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Photo upload failed. Please try again.',
+                    'error' => 'Unable to upload photo to cloud storage'
+                ], 500);
+            }
         }
 
-        // Create the task log
-        $taskLog = TaskLog::create([
-            'user_id' => Auth::id(),
-            'attendance_id' => $attendance->id,
-            'description' => $request->description,
-            'photo_url' => $photoUrl
-        ]);
+        try {
+            // Create the task log - store S3 path in photo_url column
+            $taskLog = TaskLog::create([
+                'user_id' => Auth::id(),
+                'attendance_id' => $attendance->id,
+                'description' => $request->description,
+                'photo_url' => $photoPath // Store S3 path instead of URL
+            ]);
+
+            // Prepare response data
+            $responseData = [
+                'id' => $taskLog->id,
+                'user_id' => $taskLog->user_id,
+                'attendance_id' => $taskLog->attendance_id,
+                'description' => $taskLog->description,
+                'photo_url' => $temporaryUrl, // Return temporary URL for immediate access
+                'created_at' => $taskLog->created_at,
+                'has_photo' => !is_null($photoPath)
+            ];
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Task log added successfully',
+                'data' => $responseData
+            ], 201);
+        } catch (\Exception $e) {
+            // If task log creation fails and we uploaded a photo, clean up S3
+            if ($photoPath) {
+                try {
+                    Storage::disk('s3')->delete($photoPath);
+                } catch (\Exception $cleanupError) {
+                    \Log::error('Failed to cleanup S3 file after task log creation failure', [
+                        'photo_path' => $photoPath,
+                        'error' => $cleanupError->getMessage()
+                    ]);
+                }
+            }
+
+            \Log::error('Task log creation failed', [
+                'user_id' => Auth::id(),
+                'attendance_id' => $attendance->id,
+                'error' => $e->getMessage()
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to create task log. Please try again.',
+                'error' => 'Database operation failed'
+            ], 500);
+        }
+    }
+
+    public function getTaskLogPhoto($taskLogId)
+    {
+        $currentUser = Auth::user();
+        $isAdmin = $currentUser->role === 'admin';
+
+        // Build query based on user role
+        $query = TaskLog::where('id', $taskLogId);
+
+        // If not admin, restrict to own task logs only
+        if (!$isAdmin) {
+            $query->where('user_id', Auth::id());
+        }
+
+        $taskLog = $query->first();
+
+        if (!$taskLog) {
+            return response()->json([
+                'status' => false,
+                'message' => $isAdmin ? 'Task log not found' : 'Task log not found or unauthorized'
+            ], 404);
+        }
+
+        if (!$taskLog->photo_url) {
+            return response()->json([
+                'status' => false,
+                'message' => 'No photo found for this task log'
+            ], 404);
+        }
+
+        try {
+            // Check if file exists in S3
+            if (!Storage::disk('s3')->exists($taskLog->photo_url)) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Photo file not found in storage'
+                ], 404);
+            }
+
+            // Generate temporary URL (valid for 24 hours)
+            $temporaryUrl = Storage::disk('s3')->temporaryUrl(
+                $taskLog->photo_url,
+                now()->addHours(24)
+            );
+
+            // Get file metadata
+            $fileSize = Storage::disk('s3')->size($taskLog->photo_url);
+            $mimeType = Storage::disk('s3')->mimeType($taskLog->photo_url);
+
+            $responseData = [
+                'task_log_id' => $taskLog->id,
+                'attendance_id' => $taskLog->attendance_id,
+                'photo_url' => $temporaryUrl,
+                'expires_at' => now()->addHours(24)->toDateTimeString(),
+                'file_info' => [
+                    'size' => $fileSize,
+                    'size_formatted' => $this->formatFileSize($fileSize),
+                    'mime_type' => $mimeType
+                ]
+            ];
+
+            // Include user info for admin
+            if ($isAdmin) {
+                $responseData['user'] = [
+                    'id' => $taskLog->user_id,
+                    'name' => $taskLog->user->name ?? 'Unknown'
+                ];
+            }
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Photo URL generated successfully',
+                'data' => $responseData
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Failed to generate photo URL for task log', [
+                'task_log_id' => $taskLog->id,
+                'photo_path' => $taskLog->photo_url,
+                'requested_by' => Auth::id(),
+                'error' => $e->getMessage()
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to generate photo URL'
+            ], 500);
+        }
+    }
+
+    /**
+     * Get all task log photos for a specific attendance record
+     * Employees can only see their own, Admins can see any
+     *
+     * @param  int  $attendanceId
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function getAttendanceTaskLogPhotos($attendanceId)
+    {
+        $currentUser = Auth::user();
+        $isAdmin = $currentUser->role === 'admin';
+
+        // First, get the attendance record
+        $attendanceQuery = Attendance::where('id', $attendanceId);
+
+        // If not admin, restrict to own attendance only
+        if (!$isAdmin) {
+            $attendanceQuery->where('user_id', Auth::id());
+        }
+
+        $attendance = $attendanceQuery->first();
+
+        if (!$attendance) {
+            return response()->json([
+                'status' => false,
+                'message' => $isAdmin ? 'Attendance record not found' : 'Attendance record not found or unauthorized'
+            ], 404);
+        }
+
+        // Get task logs with photos for this attendance
+        $taskLogs = TaskLog::where('attendance_id', $attendanceId)
+            ->whereNotNull('photo_url')
+            ->with('user:id,name') // Include user info for admin
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        if ($taskLogs->isEmpty()) {
+            return response()->json([
+                'status' => true,
+                'message' => 'No photos found for this attendance record',
+                'data' => [
+                    'attendance_id' => $attendanceId,
+                    'photos' => []
+                ]
+            ]);
+        }
+
+        $photos = [];
+        foreach ($taskLogs as $taskLog) {
+            try {
+                // Check if file exists in S3
+                if (Storage::disk('s3')->exists($taskLog->photo_url)) {
+                    // Generate temporary URL
+                    $temporaryUrl = Storage::disk('s3')->temporaryUrl(
+                        $taskLog->photo_url,
+                        now()->addHours(24)
+                    );
+
+                    $photoData = [
+                        'task_log_id' => $taskLog->id,
+                        'description' => $taskLog->description,
+                        'photo_url' => $temporaryUrl,
+                        'created_at' => $taskLog->created_at,
+                        'expires_at' => now()->addHours(24)->toDateTimeString()
+                    ];
+
+                    // Include user info for admin
+                    if ($isAdmin && $taskLog->user) {
+                        $photoData['user'] = [
+                            'id' => $taskLog->user->id,
+                            'name' => $taskLog->user->name
+                        ];
+                    }
+
+                    $photos[] = $photoData;
+                }
+            } catch (\Exception $e) {
+                // Log error but continue with other photos
+                \Log::error('Failed to generate photo URL for task log', [
+                    'task_log_id' => $taskLog->id,
+                    'photo_path' => $taskLog->photo_url,
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
 
         return response()->json([
             'status' => true,
-            'message' => 'Task log added successfully',
-            'data' => $taskLog
-        ], 201);
+            'message' => 'Photos retrieved successfully',
+            'data' => [
+                'attendance_id' => $attendanceId,
+                'attendance_date' => $attendance->created_at->toDateString(),
+                'attendance_user' => $isAdmin ? [
+                    'id' => $attendance->user_id,
+                    'name' => $attendance->user->name ?? 'Unknown'
+                ] : null,
+                'photos_count' => count($photos),
+                'photos' => $photos
+            ]
+        ]);
+    }
+
+    /**
+     * Helper method to format file size
+     *
+     * @param int $bytes
+     * @return string
+     */
+    private function formatFileSize($bytes)
+    {
+        if ($bytes == 0) return '0 B';
+
+        $units = ['B', 'KB', 'MB', 'GB'];
+        $factor = floor((strlen($bytes) - 1) / 3);
+
+        return sprintf("%.2f %s", $bytes / pow(1024, $factor), $units[$factor]);
+    }
+
+    /**
+     * Update a task log (description and/or photo)
+     * Employees can only update their own task logs, Admins can update any
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $taskLogId
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function updateTaskLog(Request $request, $taskLogId)
+    {
+        $currentUser = Auth::user();
+        $isAdmin = $currentUser->role === 'admin';
+
+        // Build query based on user role
+        $query = TaskLog::where('id', $taskLogId);
+
+        // If not admin, restrict to own task logs only
+        if (!$isAdmin) {
+            $query->where('user_id', Auth::id());
+        }
+
+        $taskLog = $query->first();
+
+        if (!$taskLog) {
+            return response()->json([
+                'status' => false,
+                'message' => $isAdmin ? 'Task log not found' : 'Task log not found or unauthorized'
+            ], 404);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'description' => 'nullable|string|max:1000',
+            'photo' => 'nullable|image|mimes:jpeg,png,jpg,webp|max:5120' // 5MB max
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => false,
+                'message' => VALIDATION_FAILED_MESSAGE,
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        // Check if at least one field is being updated
+        if (!$request->has('description') && !$request->hasFile('photo')) {
+            return response()->json([
+                'status' => false,
+                'message' => 'At least one field (description or photo) must be provided for update'
+            ], 422);
+        }
+
+        $updateData = [];
+        $newPhotoPath = null;
+        $temporaryUrl = null;
+        $oldPhotoPath = $taskLog->photo_url;
+
+        // Handle photo upload if present
+        if ($request->hasFile('photo') && $request->file('photo')->isValid()) {
+            try {
+                $file = $request->file('photo');
+                $userId = $taskLog->user_id;
+                $attendanceId = $taskLog->attendance_id;
+
+                // Generate a unique filename with timestamp and user info
+                $timestamp = now()->format('Y-m-d_H-i-s');
+                $originalName = pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);
+                $extension = $file->getClientOriginalExtension();
+                $fileName = "user_{$userId}_attendance_{$attendanceId}_{$timestamp}_{$originalName}.{$extension}";
+
+                // Create the S3 path: task-logs/year/month/filename
+                $year = now()->format('Y');
+                $month = now()->format('m');
+
+                // Upload new photo to S3 with private visibility
+                $newPhotoPath = $file->storeAs(
+                    "task-logs/{$year}/{$month}",
+                    $fileName,
+                    ['disk' => 's3', 'visibility' => 'private']
+                );
+
+                if ($newPhotoPath) {
+                    $updateData['photo_url'] = $newPhotoPath;
+
+                    // Generate temporary URL for response
+                    $temporaryUrl = Storage::disk('s3')->temporaryUrl(
+                        $newPhotoPath,
+                        now()->addHours(24)
+                    );
+                }
+            } catch (\Exception $e) {
+                \Log::error('S3 Upload failed for task log photo update', [
+                    'task_log_id' => $taskLogId,
+                    'user_id' => Auth::id(),
+                    'error' => $e->getMessage()
+                ]);
+
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Photo upload failed. Please try again.',
+                    'error' => 'Unable to upload photo to cloud storage'
+                ], 500);
+            }
+        }
+
+        // Handle description update
+        if ($request->has('description')) {
+            $updateData['description'] = $request->description;
+        }
+
+        try {
+            // Update the task log
+            $taskLog->update($updateData);
+
+            // If new photo was uploaded successfully, delete the old photo
+            if ($newPhotoPath && $oldPhotoPath) {
+                try {
+                    Storage::disk('s3')->delete($oldPhotoPath);
+                } catch (\Exception $e) {
+                    // Log warning but don't fail the update
+                    \Log::warning('Failed to delete old task log photo after successful update', [
+                        'task_log_id' => $taskLogId,
+                        'old_photo_path' => $oldPhotoPath,
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            }
+
+            // Prepare response data
+            $responseData = [
+                'id' => $taskLog->id,
+                'user_id' => $taskLog->user_id,
+                'attendance_id' => $taskLog->attendance_id,
+                'description' => $taskLog->description,
+                'created_at' => $taskLog->created_at,
+                'updated_fields' => array_keys($updateData),
+                'has_photo' => !is_null($taskLog->photo_url)
+            ];
+
+            // Add photo info to response
+            if ($taskLog->photo_url) {
+                // Use new temporary URL if photo was just uploaded, otherwise generate one
+                if ($temporaryUrl) {
+                    $responseData['photo_url'] = $temporaryUrl;
+                } else {
+                    try {
+                        if (Storage::disk('s3')->exists($taskLog->photo_url)) {
+                            $responseData['photo_url'] = Storage::disk('s3')->temporaryUrl(
+                                $taskLog->photo_url,
+                                now()->addHours(24)
+                            );
+                        }
+                    } catch (\Exception $e) {
+                        \Log::error('Failed to generate photo URL after task log update', [
+                            'task_log_id' => $taskLogId,
+                            'error' => $e->getMessage()
+                        ]);
+                    }
+                }
+
+                $responseData['photo_expires_at'] = now()->addHours(24)->toDateTimeString();
+            } else {
+                $responseData['photo_url'] = null;
+            }
+
+            // Include user info for admin
+            if ($isAdmin) {
+                $responseData['user'] = [
+                    'id' => $taskLog->user_id,
+                    'name' => $taskLog->user->name ?? 'Unknown'
+                ];
+            }
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Task log updated successfully',
+                'data' => $responseData
+            ]);
+        } catch (\Exception $e) {
+            // If database update fails and we uploaded a new photo, clean it up
+            if ($newPhotoPath) {
+                try {
+                    Storage::disk('s3')->delete($newPhotoPath);
+                } catch (\Exception $cleanupError) {
+                    \Log::error('Failed to cleanup new S3 file after task log update failure', [
+                        'task_log_id' => $taskLogId,
+                        'new_photo_path' => $newPhotoPath,
+                        'error' => $cleanupError->getMessage()
+                    ]);
+                }
+            }
+
+            \Log::error('Task log update failed', [
+                'task_log_id' => $taskLogId,
+                'user_id' => Auth::id(),
+                'error' => $e->getMessage()
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to update task log. Please try again.',
+                'error' => 'Database operation failed'
+            ], 500);
+        }
+    }
+
+    /**
+     * Delete a task log and its associated photo
+     * Employees can only delete their own task logs, Admins can delete any
+     *
+     * @param  int  $taskLogId
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function deleteTaskLog($taskLogId)
+    {
+        $currentUser = Auth::user();
+        $isAdmin = $currentUser->role === 'admin';
+
+        // Build query based on user role
+        $query = TaskLog::where('id', $taskLogId);
+
+        // If not admin, restrict to own task logs only
+        if (!$isAdmin) {
+            $query->where('user_id', Auth::id());
+        }
+
+        $taskLog = $query->first();
+
+        if (!$taskLog) {
+            return response()->json([
+                'status' => false,
+                'message' => $isAdmin ? 'Task log not found' : 'Task log not found or unauthorized'
+            ], 404);
+        }
+
+        $photoPath = $taskLog->photo_url;
+
+        try {
+            // Delete the task log from database
+            $taskLog->delete();
+
+            // Delete the photo from S3 if exists
+            if ($photoPath) {
+                try {
+                    Storage::disk('s3')->delete($photoPath);
+                } catch (\Exception $e) {
+                    // Log warning but don't fail the delete operation
+                    \Log::warning('Failed to delete task log photo from S3 after database deletion', [
+                        'task_log_id' => $taskLogId,
+                        'photo_path' => $photoPath,
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            }
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Task log deleted successfully',
+                'data' => [
+                    'deleted_task_log_id' => $taskLogId,
+                    'had_photo' => !is_null($photoPath),
+                    'deleted_by' => Auth::id()
+                ]
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Task log deletion failed', [
+                'task_log_id' => $taskLogId,
+                'user_id' => Auth::id(),
+                'error' => $e->getMessage()
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to delete task log. Please try again.',
+                'error' => 'Database operation failed'
+            ], 500);
+        }
     }
 
     /**
@@ -894,28 +1469,75 @@ class AttendanceController extends Controller
     }
 
     /**
+     * Helper method to process task logs and include photo URLs
+     *
+     * @param \Illuminate\Database\Eloquent\Collection $taskLogs
+     * @return array
+     */
+    private function processTaskLogsWithPhotos($taskLogs)
+    {
+        $processedLogs = [];
+
+        foreach ($taskLogs as $log) {
+            $logData = [
+                'id' => $log->id,
+                'description' => $log->description,
+                'created_at' => $log->created_at,
+                'has_photo' => !is_null($log->photo_url),
+                'photo_url' => null
+            ];
+
+            // Generate photo URL if photo exists
+            if ($log->photo_url) {
+                try {
+                    // Check if file exists in S3 before generating URL
+                    if (Storage::disk('s3')->exists($log->photo_url)) {
+                        $logData['photo_url'] = Storage::disk('s3')->temporaryUrl(
+                            $log->photo_url,
+                            now()->addHours(24)
+                        );
+                        $logData['photo_expires_at'] = now()->addHours(24)->toDateTimeString();
+                    } else {
+                        // File doesn't exist, mark as missing
+                        $logData['has_photo'] = false;
+                        $logData['photo_status'] = 'missing';
+                    }
+                } catch (\Exception $e) {
+                    // Log error but don't break the response
+                    \Log::error('Failed to generate photo URL for task log in listing', [
+                        'task_log_id' => $log->id,
+                        'photo_path' => $log->photo_url,
+                        'error' => $e->getMessage()
+                    ]);
+                    $logData['photo_status'] = 'error';
+                }
+            }
+
+            $processedLogs[] = $logData;
+        }
+
+        return $processedLogs;
+    }
+
+    /**
      * Process the data to compute daily stats with corrected time calculations
      */
     private function processDailyStats($groupedAttendances, $includeTaskLogs = true)
     {
-        // Process the data to compute daily stats
         $report = [];
         foreach ($groupedAttendances as $date => $records) {
             $clockIn = $records->where('clock_type', 'in')->first();
             $clockOut = $records->where('clock_type', 'out')->last();
 
-            $totalMinutes = 0; // Default to 0 instead of null
-            $totalHours = 0;   // Default to 0 instead of null
-            $hoursFormatted = "0:00"; // Default formatted value
+            $totalMinutes = 0;
+            $totalHours = 0;
+            $hoursFormatted = "0:00";
 
             if ($clockIn && $clockOut) {
                 $inTime = Carbon::parse($clockIn->created_at);
                 $outTime = Carbon::parse($clockOut->created_at);
 
-                // FIX: Ensure proper time difference calculation
                 if ($outTime->lt($inTime)) {
-                    // If clock-out time is before clock-in time (error or midnight crossing)
-                    // Just set to 0 or handle as needed for your business logic
                     $totalMinutes = 0;
                 } else {
                     $totalMinutes = $outTime->diffInMinutes($inTime);
@@ -925,21 +1547,18 @@ class AttendanceController extends Controller
                 $hoursFormatted = sprintf("%d:%02d", $totalHours, $totalMinutes % 60);
             }
 
-            // Get task logs for this day if requested
+            // Get task logs for this day with photo URLs
             $taskLogs = [];
             if ($includeTaskLogs) {
+                $allTaskLogs = collect();
                 foreach ($records as $record) {
                     if ($record->relationLoaded('taskLogs')) {
-                        foreach ($record->taskLogs as $log) {
-                            $taskLogs[] = [
-                                'id' => $log->id,
-                                'description' => $log->description,
-                                'photo_url' => $log->photo_url,
-                                'created_at' => $log->created_at
-                            ];
-                        }
+                        $allTaskLogs = $allTaskLogs->merge($record->taskLogs);
                     }
                 }
+
+                // Process task logs to include photo URLs
+                $taskLogs = $this->processTaskLogsWithPhotos($allTaskLogs);
             }
 
             $reportEntry = [
@@ -950,14 +1569,17 @@ class AttendanceController extends Controller
                 'clock_in_method' => $clockIn ? $clockIn->method : null,
                 'clock_out_method' => $clockOut ? $clockOut->method : null,
                 'location' => $clockIn ? $clockIn->location : null,
-                'total_hours' => (int)$totalHours, // Cast to integer
-                'total_minutes' => (int)$totalMinutes, // Cast to integer
+                'total_hours' => (int)$totalHours,
+                'total_minutes' => (int)$totalMinutes,
                 'hours_formatted' => $hoursFormatted,
             ];
 
             if ($includeTaskLogs) {
                 $reportEntry['task_logs'] = $taskLogs;
                 $reportEntry['task_logs_count'] = count($taskLogs);
+                $reportEntry['photos_count'] = count(array_filter($taskLogs, function ($log) {
+                    return $log['has_photo'] && !is_null($log['photo_url']);
+                }));
             }
 
             $report[] = $reportEntry;

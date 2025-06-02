@@ -25,6 +25,12 @@ class UserResource extends JsonResource
             'position' => $this->position,
             'department_id' => $this->department_id,
             'department' => $this->when($this->department, new DepartmentResource($this->department)),
+
+            // Photo profile information
+            'has_photo_profile' => $this->has_photo_profile,
+            'photo_profile_url' => $this->photo_profile_url,
+            'photo_profile_expires_at' => $this->has_photo_profile ?
+                now()->addHours(24)->toDateTimeString() : null,
         ];
     }
 }

@@ -19,29 +19,68 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::post('/register', [RegisteredUserController::class, 'store']);
 Route::get('/departments', [DepartmentController::class, 'index']);
 
-
 // Protected routes
 Route::middleware('auth:sanctum')->group(function () {
     // Auth routes
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/user', [AuthController::class, 'user']);
+    // Upload/Update photo profile
+    Route::post('/users/{userId}/photo-profile', [UserController::class, 'uploadPhotoProfile'])
+        ->name('users.photo-profile.upload');
+
+    // Get photo profile URL
+    Route::get('/users/{userId}/photo-profile', [UserController::class, 'getPhotoProfile'])
+        ->name('users.photo-profile.show');
+
+    // Delete photo profile
+    Route::delete('/users/{userId}/photo-profile', [UserController::class, 'deletePhotoProfile'])
+        ->name('users.photo-profile.delete');
+
+    // User profile routes (accessible by all authenticated users for their own profile)
+    Route::get('/profile', [UserController::class, 'getProfile'])
+        ->name('profile.show');
+    
+    Route::put('/profile', [UserController::class, 'updateProfile'])
+        ->name('profile.update');
 
     // Regular employee routes
 
     // IMPORTANT: Order matters here - more specific routes must come first!
 
-    // Attendance routes
-    Route::get('/attendance/today', [AttendanceController::class, 'today']);
-    // Get attendance records for a date range
-    Route::get('/attendance/report', [AttendanceController::class, 'report']);
-    // Get all attendance records for the authenticated employee
-    Route::get('/attendance', [AttendanceController::class, 'index']);
-    // Get a specific attendance record
-    Route::get('/attendance/{id}', [AttendanceController::class, 'show']);
-    // Create a new attendance record (clock in/out)
-    Route::post('/attendance', [AttendanceController::class, 'store']);
-    // Add a task log to an attendance record
-    Route::post('/attendance/{attendance}/task-logs', [AttendanceController::class, 'addTaskLog']);
+    Route::prefix('attendance')->group(function () {
+
+        // Basic Attendance Routes
+        Route::get('/', [AttendanceController::class, 'index'])->name('attendance.index');
+        Route::post('/', [AttendanceController::class, 'store'])->name('attendance.store');
+        Route::get('/latest', [AttendanceController::class, 'latest'])->name('attendance.latest');
+        Route::get('/today', [AttendanceController::class, 'today'])->name('attendance.today');
+        Route::get('/report', [AttendanceController::class, 'report'])->name('attendance.report');
+        Route::get('/{id}', [AttendanceController::class, 'show'])->name('attendance.show');
+
+        // Task Log Management
+        Route::post('/{attendance}/task-log', [AttendanceController::class, 'addTaskLog'])
+            ->name('attendance.task-log.store');
+
+        // Task Log CRUD Operations
+        // Update task log (description and/or photo)
+        Route::put('/task-log/{taskLogId}', [AttendanceController::class, 'updateTaskLog'])
+            ->name('attendance.task-log.update');
+
+        // Alternative PATCH route for partial updates
+        Route::patch('/task-log/{taskLogId}', [AttendanceController::class, 'updateTaskLog'])
+            ->name('attendance.task-log.patch');
+
+        // Delete task log and its photo
+        Route::delete('/task-log/{taskLogId}', [AttendanceController::class, 'deleteTaskLog'])
+            ->name('attendance.task-log.delete');
+
+        // Photo Retrieval Routes
+        Route::get('/task-log/{taskLogId}/photo', [AttendanceController::class, 'getTaskLogPhoto'])
+            ->name('attendance.task-log.photo');
+
+        Route::get('/{attendanceId}/photos', [AttendanceController::class, 'getAttendanceTaskLogPhotos'])
+            ->name('attendance.photos');
+    });
 
     // Working hours routes (available to all authenticated users for viewing)
     Route::get('/working-hours/user/{userId}', [WorkingHourController::class, 'getForUser']);
