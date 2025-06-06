@@ -73,13 +73,6 @@ Route::middleware('auth:sanctum')->group(function () {
         // Delete task log and its photo
         Route::delete('/task-log/{taskLogId}', [AttendanceController::class, 'deleteTaskLog'])
             ->name('attendance.task-log.delete');
-
-        // Photo Retrieval Routes
-        Route::get('/task-log/{taskLogId}/photo', [AttendanceController::class, 'getTaskLogPhoto'])
-            ->name('attendance.task-log.photo');
-
-        Route::get('/{attendanceId}/photos', [AttendanceController::class, 'getAttendanceTaskLogPhotos'])
-            ->name('attendance.photos');
     });
 
     // Working hours routes (available to all authenticated users for viewing)
@@ -136,7 +129,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/leave-requests/{id}', [LeaveRequestController::class, 'destroy']);
 
         // QR code generation route
-        Route::post('/qrcode/generate', [QrCodeController::class, 'generate']);
+        Route::post('/qr-code/generate', [QrCodeController::class, 'generate']);
 
         // Admin-only announcement routes
         Route::post('/announcements', [AnnouncementController::class, 'store']); // POST with department_ids[]

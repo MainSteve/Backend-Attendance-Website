@@ -44,7 +44,7 @@ class QrCodeController extends Controller
 
         // Generate a unique token
         $token = Str::random(32);
-        
+
         // Set expiry time (default: 10 minutes)
         $expiryMinutes = $request->input('expiry_minutes', 10);
         $expiresAt = Carbon::now()->addMinutes($expiryMinutes);
@@ -60,8 +60,9 @@ class QrCodeController extends Controller
         ]);
 
         // Generate the URL that will be encoded in the QR code
-        $baseUrl = config('app.url');
-        $qrUrl = "{$baseUrl}/api/attendance/qr/{$token}";
+        // This should point to your FRONTEND, not backend
+        $frontendUrl = config('app.frontend_url');
+        $qrUrl = "{$frontendUrl}/qr-scan?token={$token}";
 
         return response()->json([
             'status' => true,
@@ -76,7 +77,7 @@ class QrCodeController extends Controller
     }
 
     /**
-     * Process QR code scan
+     * Process QR code scan (REQUIRES AUTHENTICATION)
      *
      * @param string $token
      * @return \Illuminate\Http\JsonResponse
@@ -85,14 +86,14 @@ class QrCodeController extends Controller
     {
         // Find the token
         $qrToken = QrToken::where('token', $token)->first();
-        
+
         if (!$qrToken) {
             return response()->json([
                 'status' => false,
                 'message' => 'Invalid QR code'
             ], 404);
         }
-        
+
         // Check if token is already used
         if ($qrToken->is_used) {
             return response()->json([
@@ -100,7 +101,7 @@ class QrCodeController extends Controller
                 'message' => 'QR code has already been used'
             ], 400);
         }
-        
+
         // Check if token is expired
         if (Carbon::now()->isAfter($qrToken->expires_at)) {
             return response()->json([
@@ -108,22 +109,22 @@ class QrCodeController extends Controller
                 'message' => 'QR code has expired'
             ], 400);
         }
-        
+
         // Mark token as used
         $qrToken->is_used = true;
         $qrToken->save();
-        
+
         // Call the attendance controller's store method
         $attendanceController = new AttendanceController();
-        
+
         // Create a new request with the necessary data
         $attendanceRequest = new Request([
             'clock_type' => $qrToken->clock_type,
             'location' => $qrToken->location,
             'method' => 'qr_code'
         ]);
-        
-        // Process the attendance
+
+        // Process the attendance (now with authenticated user)
         return $attendanceController->store($attendanceRequest);
     }
 }
