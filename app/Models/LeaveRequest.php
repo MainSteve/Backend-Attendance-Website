@@ -46,7 +46,31 @@ class LeaveRequest extends Model
     {
         return $this->belongsTo(User::class);
     }
-    
+
+    /**
+     * Get the proofs for this leave request
+     */
+    public function proofs(): HasMany
+    {
+        return $this->hasMany(LeaveRequestProof::class);
+    }
+
+    /**
+     * Get only verified proofs for this leave request
+     */
+    public function verifiedProofs(): HasMany
+    {
+        return $this->hasMany(LeaveRequestProof::class)->where('is_verified', true);
+    }
+
+    /**
+     * Get only unverified proofs for this leave request
+     */
+    public function unverifiedProofs(): HasMany
+    {
+        return $this->hasMany(LeaveRequestProof::class)->where('is_verified', false);
+    }
+
     /**
      * Calculate the duration of the leave request in days
      */

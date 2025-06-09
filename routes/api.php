@@ -39,7 +39,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // User profile routes (accessible by all authenticated users for their own profile)
     Route::get('/profile', [UserController::class, 'getProfile'])
         ->name('profile.show');
-    
+
     Route::put('/profile', [UserController::class, 'updateProfile'])
         ->name('profile.update');
 
@@ -92,6 +92,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/leave-requests/{id}', [LeaveRequestController::class, 'show']);
     Route::post('/leave-requests/{id}/cancel', [LeaveRequestController::class, 'cancel']);
 
+    // Leave request proof management routes
+    Route::post('/leave-requests/{id}/proofs', [LeaveRequestController::class, 'addProofs'])
+        ->name('leave-requests.proofs.add');
+    Route::delete('/leave-request-proofs/{proofId}', [LeaveRequestController::class, 'deleteProof'])
+        ->name('leave-requests.proofs.delete');
+    Route::get('/leave-request-proofs/{proofId}/url', [LeaveRequestController::class, 'getProofUrl'])
+        ->name('leave-requests.proofs.url');
+
     Route::get('/attendance/qr/{token}', [QrCodeController::class, 'process']);
 
     // Announcement routes for all authenticated users
@@ -127,6 +135,10 @@ Route::middleware('auth:sanctum')->group(function () {
         // Admin-only leave request routes
         Route::post('/leave-requests/{id}/status', [LeaveRequestController::class, 'updateStatus']);
         Route::delete('/leave-requests/{id}', [LeaveRequestController::class, 'destroy']);
+
+        // Admin-only proof verification routes
+        Route::post('/leave-request-proofs/{proofId}/verify', [LeaveRequestController::class, 'verifyProof'])
+            ->name('leave-requests.proofs.verify');
 
         // QR code generation route
         Route::post('/qr-code/generate', [QrCodeController::class, 'generate']);
