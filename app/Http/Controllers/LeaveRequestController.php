@@ -598,7 +598,7 @@ class LeaveRequestController extends Controller
         }
 
         try {
-            $minutes = $request->input('expires_in', 60); // Default 1 hour
+            $minutes = (int) $request->input('expires_in', 60); // Default 1 hour
             $url = $proof->getTemporaryUrl($minutes);
 
             return response()->json([
