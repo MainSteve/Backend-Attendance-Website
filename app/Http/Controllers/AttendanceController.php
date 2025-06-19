@@ -27,11 +27,14 @@ class AttendanceController extends Controller
      */
     public function index(Request $request)
     {
-        $user_id = Auth::id();
-
         // Build the query
-        $query = Attendance::with('taskLogs')
-            ->where('user_id', $user_id);
+        if (Auth::user()->role === 'admin' && $request->has('user_id')) {
+            $query = Attendance::with('taskLogs')
+                ->where('user_id', $request->user_id);
+        } else {
+            $query = Attendance::with('taskLogs')
+                ->where('user_id', Auth::id());
+        }
 
         // Handle date filters
         if ($request->has('days')) {
@@ -240,16 +243,22 @@ class AttendanceController extends Controller
      */
     public function show($id)
     {
-        $employee_id = Auth::id();
-        $attendance = Attendance::with('taskLogs')
-            ->where('id', $id)
-            ->where('user_id', $employee_id)
-            ->first();
+        // Check if user is admin
+        $isAdmin = Auth::user()->role === 'admin';
+
+        // Build query based on user role
+        $query = Attendance::with('taskLogs')->where('id', $id);
+        if (!$isAdmin) {
+            // If not admin, restrict to own records only
+            $query->where('user_id', Auth::id());
+        }
+
+        $attendance = $query->first();
 
         if (!$attendance) {
             return response()->json([
                 'status' => false,
-                'message' => 'Attendance record not found'
+                'message' => $isAdmin ? 'Attendance record not found' : 'Attendance record not found or unauthorized'
             ], 404);
         }
 

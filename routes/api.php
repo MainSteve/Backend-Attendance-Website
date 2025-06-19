@@ -16,11 +16,10 @@ use App\Http\Controllers\AnnouncementController;
 
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
-Route::post('/register', [RegisteredUserController::class, 'store']);
-Route::get('/departments', [DepartmentController::class, 'index']);
 
 // Protected routes
 Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/departments', [DepartmentController::class, 'index']);
     // Auth routes
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/user', [AuthController::class, 'user']);
@@ -110,7 +109,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Admin only routes
     Route::middleware('role:admin')->group(function () {
         // Department and user management
-        Route::apiResource('departments', DepartmentController::class)->except(['index']);
+        Route::post('/register', [RegisteredUserController::class, 'store']);
         Route::apiResource('users', UserController::class);
 
         // Admin-only working hours routes
