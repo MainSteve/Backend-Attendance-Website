@@ -3,8 +3,8 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Validation\ValidationException;
 
@@ -28,12 +28,19 @@ class PasswordResetLinkController extends Controller
             $request->only('email')
         );
 
-        if ($status != Password::RESET_LINK_SENT) {
-            throw ValidationException::withMessages([
-                'email' => [__($status)],
-            ]);
+        if ($status == Password::RESET_LINK_SENT) {
+            return response()->json([
+                'message' => 'We have emailed your password reset link!',
+                'status' => 'success'
+            ], 200);
         }
 
-        return response()->json(['status' => __($status)]);
+        // If an error occurred, return JSON error response instead of throwing exception
+        return response()->json([
+            'message' => 'Unable to send reset link. Please check your email address.',
+            'errors' => [
+                'email' => [__($status)]
+            ]
+        ], 422);
     }
 }

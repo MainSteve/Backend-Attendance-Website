@@ -13,9 +13,32 @@ use Illuminate\Auth\Events\Registered;
 use App\Http\Controllers\Auth\RegisteredUserController;
 use App\Http\Controllers\QrCodeController;
 use App\Http\Controllers\AnnouncementController;
+use App\Http\Controllers\Auth\PasswordResetLinkController;
+use App\Http\Controllers\Auth\ForgotPasswordController;
+use App\Http\Controllers\Auth\ResetPasswordController;
+use App\Http\Controllers\Auth\NewPasswordController;
 
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
+
+Route::prefix('auth')->group(function () {
+    Route::post('forgot-password', ForgotPasswordController::class)
+        ->middleware(['guest', 'throttle:5,1'])
+        ->name('password.email');
+    
+    Route::post('reset-password', ResetPasswordController::class)
+        ->middleware(['guest', 'throttle:reset-password'])
+        ->name('password.update');
+});
+
+// Reset password routes
+    Route::post('/forgot-password', [PasswordResetLinkController::class, 'store'])
+        ->middleware('throttle:5,1')
+        ->name('password.email');
+        
+    Route::post('/reset-password', [NewPasswordController::class, 'store'])
+        ->middleware('throttle:5,1')
+        ->name('password.store');
 
 // Protected routes
 Route::middleware('auth:sanctum')->group(function () {
