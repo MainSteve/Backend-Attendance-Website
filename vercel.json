@@ -1,8 +1,13 @@
 {
     "version": 2,
-    "framework": null,
-    "buildCommand": "",
+    "buildCommand": "composer install --no-dev --optimize-autoloader && php artisan migrate --force && php artisan config:cache && php artisan route:cache",
     "installCommand": "composer install --no-dev --optimize-autoloader",
+    "builds": [
+        {
+            "src": "public/index.php",
+            "use": "@vercel/php"
+        }
+    ],
     "functions": {
         "api/index.php": {
             "runtime": "vercel-php@0.7.1"
