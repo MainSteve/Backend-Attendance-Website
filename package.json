@@ -1,0 +1,9 @@
+{
+  "engines": {
+    "node": "18.18.0"
+  },
+  "scripts": {
+    "dev": "echo 'No frontend build required'",
+    "build": "echo 'No frontend build required'"
+  }
+}
