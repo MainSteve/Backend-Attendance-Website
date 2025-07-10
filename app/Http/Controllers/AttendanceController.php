@@ -302,7 +302,9 @@ class AttendanceController extends Controller
         if ($clockIn && $clockOut) {
             $inTime = Carbon::parse($clockIn->created_at);
             $outTime = Carbon::parse($clockOut->created_at);
-            $totalMinutes = $outTime->diffInMinutes($inTime);
+
+            $totalMinutes = abs($outTime->diffInMinutes($inTime));
+
             $workDuration = [
                 'hours' => floor($totalMinutes / 60),
                 'minutes' => $totalMinutes % 60,
