@@ -20,8 +20,6 @@ use App\Http\Controllers\Auth\NewPasswordController;
 
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
-        Route::post('/register', [RegisteredUserController::class, 'store']);
-
 
 Route::prefix('auth')->group(function () {
     Route::post('forgot-password', ForgotPasswordController::class)
@@ -134,6 +132,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Admin only routes
     Route::middleware('role:admin')->group(function () {
         // Department and user management
+        Route::post('/register', [RegisteredUserController::class, 'store']);
         Route::apiResource('users', UserController::class);
 
         // Admin-only working hours routes
